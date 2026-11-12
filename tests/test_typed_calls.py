@@ -92,6 +92,16 @@ class ChangeTest(TypedCallTestCase):
         self.assertEqual(c["status"], "failed")
         self.assertEqual(c["level"], "ERROR")
 
+    def test_explicit_status_with_error_keeps_error_level(self):
+        # status= overrides the status only; the error still means ERROR.
+        with dbfixlog.run(self.path, mode="write", console=False) as log:
+            log.change("orders", "delete", key={"id": 1}, status="applied",
+                       error=RuntimeError("x"))
+        [c] = self.body()
+        self.assertEqual(c["status"], "applied")
+        self.assertEqual(c["level"], "ERROR")
+        self.assertEqual(c["error"], {"type": "RuntimeError", "message": "x"})
+
     def test_explicit_level_wins(self):
         with dbfixlog.run(self.path, mode="dry", console=False) as log:
             log.change("orders", "delete", key={"id": 1},

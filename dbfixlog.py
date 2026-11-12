@@ -479,7 +479,10 @@ class RunLogger(logging.LoggerAdapter):
             if v is not None:
                 data[k] = v
         if level is None:
-            level = logging.ERROR if status == "failed" else logging.INFO
+            # An explicit status= overrides the status only: a Change that
+            # carries an error is still logged at ERROR.
+            failed = status == "failed" or error is not None
+            level = logging.ERROR if failed else logging.INFO
         self._typed(level, "%s %s" % (op, table), data, src)
         if problem is not None:
             self._typed(logging.WARNING, "invalid change call: " + problem,
