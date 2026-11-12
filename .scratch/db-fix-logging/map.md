@@ -35,6 +35,8 @@ A spec, ready to hand off for building, for (1) a Python stdlib-`logging`-based 
 - [Package layout & render CLI](issues/10-package-and-cli.md): no pip package: `dbfixlog.py` + standalone `dbfixlog_render.py` (+ `report.js`/`report.css`) copied together; Python 3.6.3+, stdlib only (`threading.local` for Scopes); `python dbfixlog_render.py LOG [-o] [--title] [--open] [--strict]`, `.html` beside the log, lenient on bad lines, exit codes 0/1/2/3/4
 - [Report size budget](issues/11-report-size-budget.md): no file-size budget (size follows the data; expected 3–7 MB at 100k, information only); budgets are ≤ 0.5 s data ready and ≤ 50 ms search at 100k, checked on a realistic-entropy fixture; record schema unchanged, no runtime size check, no record cap
 
+- [Assemble hand-off spec](issues/12-assemble-handoff-spec.md): [SPEC.md](SPEC.md) gathers every decision, applies the replaced answers and links each section to its ticket. Two undecided details (display time zone, summary-line stream) are listed for the builder in §9
+
 ## Not yet specified
 
 <!-- empty: the remaining fog was ticketed (Report size budget) or ruled out of scope -->
