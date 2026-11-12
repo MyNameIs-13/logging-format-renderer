@@ -14,13 +14,10 @@ import unittest
 import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import dbfixlog  # noqa: E402
-
-
-def read_records(path):
-    with open(path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f]
+from helpers import read_records  # noqa: E402
 
 
 class ValueTest(unittest.TestCase):

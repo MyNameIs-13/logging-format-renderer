@@ -1,7 +1,7 @@
 """Headless Firefox checks on rendered Reports opened from file://.
 
-Covers decoding (ticket 06), the Report core (ticket 07: Run Header, mode strip,
-notices, the list's columns and value display) and the filter bar (ticket 08).
+Covers decoding the embedded data, the Report core (Run Header, mode strip,
+notices, the list's columns and value display) and the filter bar.
 
 Skipped when firefox or node is not on PATH, or when DBFIXLOG_SKIP_BROWSER is set.
 """
@@ -16,6 +16,10 @@ import threading
 import time
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from helpers import render_records  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "dbfixlog_render.py")
@@ -117,13 +121,7 @@ class StubReportInFirefox(unittest.TestCase):
         return json.loads(proc.stdout.decode("utf-8"))
 
     def render(self, name, records, probe=PROBE):
-        log = os.path.join(self.dir, name + ".jsonl")
-        with open(log, "w", encoding="utf-8") as f:
-            for r in records:
-                f.write(json.dumps(r) + "\n")
-        report = os.path.join(self.dir, name + ".html")
-        subprocess.run([sys.executable, SCRIPT, log, "-o", report], check=True,
-                       stderr=subprocess.DEVNULL)
+        report = render_records(self.dir, name, records)
         page = self.open_report(report, probe)
         if probe is PROBE:
             self.assertEqual(page["state"], "ready", page)

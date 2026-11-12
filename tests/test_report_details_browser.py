@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 import test_report_browser as base
+from helpers import render_records
 from test_report_browser import START, END, msg, change
 
 _FF = base.StubReportInFirefox.__dict__  # not the class itself: unittest would collect it
@@ -26,14 +27,7 @@ class DetailsPanelInFirefox(unittest.TestCase):
     _wait_for_bidi = _FF["_wait_for_bidi"]
 
     def render(self, name, records):
-        log = os.path.join(self.dir, name + ".jsonl")
-        with open(log, "w", encoding="utf-8") as f:
-            for r in records:
-                f.write(json.dumps(r) + "\n")
-        report = os.path.join(self.dir, name + ".html")
-        subprocess.run([sys.executable, base.SCRIPT, log, "-o", report], check=True,
-                       stderr=subprocess.DEVNULL)
-        return report
+        return render_records(self.dir, name, records)
 
     def probe(self, report, body):
         """Run body (JS statements that fill `out`) once the Report is ready."""
