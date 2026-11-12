@@ -438,6 +438,141 @@ function isEntry(r) {
   }
 }
 
+// ---------------------------------------------------------------------------------------
+// DOM (browser only)
+// ---------------------------------------------------------------------------------------
+
+function runHeaderHTML(m) {
+  const h = m.header;
+  const p = m.payload;
+  const rows = [];
+  const row = (k, v) => rows.push('<tr><td class="dim">' + k + "</td><td>" + v + "</td></tr>");
+  if (h.target !== undefined) row("target", pairsHTML(h.target));
+  if (h.fields !== undefined) row("fields", pairsHTML(h.fields));
+  row("started", '<span class="mono">' + esc(h.ts) + "</span>");
+  if (m.unfinished) {
+    row("outcome", '<span class="out-unfinished">unfinished</span>');
+  } else {
+    const e = m.end;
+    const code = e.exit_code !== undefined && e.exit_code !== null ? " (exit code " + esc(e.exit_code) + ")" : "";
+    row("outcome", '<span class="out-' + esc(m.outcome) + '">' + esc(m.outcome) + "</span>" + code);
+    row("duration", esc(duration(e.duration_ms)));
+  }
+  row("records", esc(m.records.length.toLocaleString("en")));
+  const mode = m.mode === "dry" ? "DRY RUN" : m.mode === "write" ? "WRITE RUN" : String(m.mode).toUpperCase();
+  return '<header class="runhead">' +
+    '<div class="title"><h1>' + esc(p.title) + "</h1>" +
+    (h.description !== undefined ? '<div class="desc">' + esc(h.description) + "</div>" : "") +
+    '<div class="dim src">' + esc(p.source || "") + "</div></div>" +
+    '<div><span class="mode mode-' + esc(m.mode) + '">' + esc(mode) + "</span></div>" +
+    '<table class="facts">' + rows.join("") + "</table></header>";
+}
+
+function noticesHTML(m) {
+  let h = "";
+  const s = modeStrip(m);
+  if (s) {
+    h += '<div class="strip" data-tone="' + s.tone + '">' + esc(s.text) +
+      (s.q ? ' <a href="#" data-q="' + esc(s.q) + '">Show them</a>' : "") + "</div>";
+  }
+  for (const n of runNotices(m)) {
+    h += '<div class="notice" data-kind="' + esc(n.kind) + '" data-tone="' + n.tone + '">' + esc(n.text) +
+      (n.q ? ' <a href="#" data-q="' + esc(n.q) + '">show</a>' : "") + "</div>";
+  }
+  return h;
+}
+
+const ROW_HEIGHT = 24;
+const DEFAULT_WIDTHS = [96, 200, 96, 64, 110, 150, 130, 400];
+
+// The fixed-height virtual list. rowSource(model, mode, collapsed) returns the row indices;
+// ticket 08 replaces it to filter. setWidths() is the hook for column resizing (ticket 10).
+function createList(doc, wrap, m) {
+  wrap.innerHTML = '<div class="lhead"><div class="grid">' +
+    COLUMNS.map((c, k) => '<div class="hc" data-col="' + k + '">' + c + "</div>").join("") +
+    '</div></div><div class="list"><div class="sizer"></div><div class="rows"></div></div>';
+  const head = wrap.firstChild.firstChild;
+  const el = wrap.lastChild;
+  const sizer = el.firstChild;
+  const box = el.lastChild;
+  let raf = 0;
+  const list = {
+    model: m, mode: "tree", collapsed: new Set(), rows: [],
+    rowSource: (model, mode, collapsed) => (mode === "flat" ? flatRows(model) : treeRows(model, collapsed)),
+    refresh() {
+      list.rows = list.rowSource(m, list.mode, list.collapsed);
+      sizer.style.height = list.rows.length * ROW_HEIGHT + "px";
+      list.draw();
+    },
+    setMode(mode) { list.mode = mode === "flat" ? "flat" : "tree"; list.refresh(); },
+    toggle(id) {
+      if (list.collapsed.has(id)) list.collapsed.delete(id); else list.collapsed.add(id);
+      list.refresh();
+    },
+    setWidths(widths) {
+      wrap.style.setProperty("--cols", widths.slice(0, -1).map((w) => w + "px").join(" ") +
+        " minmax(" + widths[widths.length - 1] + "px, 1fr)");
+      wrap.style.setProperty("--tw", widths.reduce((a, b) => a + b, 0) + "px");
+    },
+    scrollToRecord(i) {
+      const k = list.rows.indexOf(i);
+      if (k >= 0) el.scrollTop = Math.max(0, k * ROW_HEIGHT - el.clientHeight / 3);
+      list.draw();
+      return k >= 0;
+    },
+    draw() {
+      raf = 0;
+      const top = el.scrollTop;
+      const a = Math.max(0, Math.floor(top / ROW_HEIGHT) - 8);
+      const b = Math.min(list.rows.length, Math.ceil((top + el.clientHeight) / ROW_HEIGHT) + 8);
+      let h = "";
+      for (let k = a; k < b; k++) {
+        const i = list.rows[k];
+        h += '<div class="vr grid ' + rowClass(m, i) + '" data-i="' + i + '" style="top:' + k * ROW_HEIGHT + 'px">' +
+          rowCells(m, i, list.mode, list.collapsed).map((c) => "<span>" + c + "</span>").join("") + "</div>";
+      }
+      box.innerHTML = h;
+      head.style.transform = "translateX(" + -el.scrollLeft + "px)";
+    },
+  };
+  el.addEventListener("scroll", () => { if (!raf) raf = requestAnimationFrame(list.draw); });
+  doc.defaultView.addEventListener("resize", () => list.draw());
+  box.addEventListener("click", (e) => {
+    const c = e.target.closest("[data-fold]");
+    if (c) list.toggle(Number(c.dataset.fold));
+  });
+  list.setWidths(DEFAULT_WIDTHS);
+  return list;
+}
+
+function renderReport(doc, app, payload) {
+  const m = buildModel(payload);
+  app.innerHTML = '<div class="report">' + runHeaderHTML(m) +
+    '<div class="notices">' + noticesHTML(m) + "</div>" +
+    '<div id="cards"></div><div id="bar"></div>' + // slots: summary cards (09), filter bar (08)
+    '<div class="listwrap"></div></div>';
+  const list = createList(doc, app.querySelector(".listwrap"), m);
+  const report = {
+    model: m, list: list,
+    // Applies a query from a notice link. Ticket 08 replaces this with the real filter;
+    // until then "is:warn" jumps to the first mismatched Change.
+    onQuery(q) {
+      if (q === "is:warn" && m.warnings.length) list.scrollToRecord(m.warnings[0]);
+      else if (q === "is:unfinished" && m.unfinishedScopes.length) {
+        list.scrollToRecord(m.scopes.get(m.unfinishedScopes[0]).start);
+      }
+    },
+  };
+  app.addEventListener("click", (e) => {
+    const a = e.target.closest("[data-q]");
+    if (!a) return;
+    e.preventDefault();
+    report.onQuery(a.dataset.q);
+  });
+  list.refresh();
+  return report;
+}
+
 async function startReport(doc) {
   const root = doc.documentElement;
   const app = doc.getElementById("app");
@@ -445,7 +580,7 @@ async function startReport(doc) {
   try {
     const payload = await decodePayload(doc.getElementById("dbfixlog-payload").textContent);
     root.dataset.recordCount = String(payload.records.length);
-    app.textContent = payload.records.length + " records";
+    doc.defaultView.dbfixlogReport = renderReport(doc, app, payload);
     root.dataset.state = "ready";
   } catch (e) {
     root.dataset.error = String(e);
