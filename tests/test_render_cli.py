@@ -339,6 +339,35 @@ class OpenFlag(RenderCase):
         self.assertEqual(self.opened_urls(), [])
 
 
+class Standalone(RenderCase):
+    def copy_renderer(self, *names):
+        dest = os.path.join(self.dir, "tools")
+        os.mkdir(dest)
+        for name in names:
+            shutil.copy(os.path.join(ROOT, name), dest)
+        return os.path.join(dest, "dbfixlog_render.py")
+
+    def run_copy(self, script, *args):
+        proc = subprocess.run([sys.executable, "-I", script] + list(args),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir)
+        return proc.returncode, proc.stdout.decode("utf-8"), proc.stderr.decode("utf-8")
+
+    def test_renders_when_copied_alone_with_report_js_and_css(self):
+        script = self.copy_renderer("dbfixlog_render.py", "report.js", "report.css")
+        code, out, err = self.run_copy(script, self.log_from(fixture_lines()), "-o", "-")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(decode_payload(out)["records"]), 10)
+        with open(os.path.join(ROOT, "report.js"), encoding="utf-8") as f:
+            self.assertIn(f.read().strip().splitlines()[0], out)
+
+    def test_missing_report_js_is_a_one_line_error(self):
+        script = self.copy_renderer("dbfixlog_render.py", "report.css")
+        code, out, err = self.run_copy(script, self.log_from(fixture_lines()))
+        self.assertEqual(code, 1)
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertIn("report.js", err)
+
+
 class OutputPath(RenderCase):
     def test_dash_o_path_writes_there_and_not_next_to_log(self):
         log = self.log_from(fixture_lines())
