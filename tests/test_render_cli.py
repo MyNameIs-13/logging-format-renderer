@@ -148,11 +148,13 @@ class InputHandling(RenderCase):
             "message": "last line incomplete, file may still be written",
         }])
 
-    def test_complete_json_without_trailing_newline_is_still_skipped(self):
+    def test_complete_json_without_trailing_newline_is_kept(self):
         log = self.log_from(fixture_lines(), trailing_newline=False)
         payload, _ = self.render_payload(log)
-        self.assertEqual(len(payload["records"]), 9)
-        self.assertEqual(payload["notices"][0]["kind"], "incomplete_last_line")
+        self.assertEqual(len(payload["records"]), 10)
+        self.assertEqual(payload["lines"][-1], 10)
+        self.assertFalse(payload["unfinished"])
+        self.assertEqual(payload["notices"], [])
 
     def test_malformed_lines_are_skipped_with_notice_and_stderr_warning(self):
         lines = fixture_lines()

@@ -53,13 +53,14 @@ def _parse_line(line):
 
 def _load_records(raw):
     """Split a snapshot of the Log File into records, their 1-based line numbers, and the
-    numbers and text of malformed lines. A last line without a trailing newline is
-    returned separately as incomplete (its line number), never parsed."""
+    numbers and text of malformed lines. A last line without a trailing newline is kept
+    if it parses as a whole record; otherwise it is a partial line, returned separately
+    as incomplete (its line number)."""
     chunks = raw.split(b"\n")
     incomplete = None
     if chunks[-1] == b"":
         chunks.pop()  # the file ends with a newline
-    else:
+    elif _parse_line(chunks[-1]) is None:
         incomplete = len(chunks)
         chunks.pop()
     records, lines, bad = [], [], []
