@@ -103,6 +103,36 @@ class ChangeTest(TypedCallTestCase):
         self.assertEqual(a["fields"], {"batch": 3})
         self.assertEqual(b["level"], "CRITICAL")
 
+    def test_changes_tuple_and_dict_forms_keep_unchanged_entries(self):
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            log.change("customers", "update", key={"id": 42},
+                       changes={"name": ("ACME", "Acme Ltd"),
+                                "city": {"old": "Oslo", "new": "Bergen"},
+                                "vip": (True, True),
+                                "note": (None, "x")})
+        [c] = self.body()
+        self.assertEqual(c["changes"], {
+            "name": {"old": "ACME", "new": "Acme Ltd"},
+            "city": {"old": "Oslo", "new": "Bergen"},
+            "vip": {"old": True, "new": True},
+            "note": {"old": None, "new": "x"},
+        })
+        self.assertEqual(list(c["changes"]), ["name", "city", "vip", "note"])
+        self.assertEqual(c["level"], "INFO")
+
+    def test_change_values_are_encoded(self):
+        import decimal
+        with dbfixlog.run(self.path, mode="dry", console=False,
+                          max_text=3) as log:
+            log.change("t", "update", key={"id": 1},
+                       changes={"price": (decimal.Decimal("1.50"),
+                                          decimal.Decimal("2.00")),
+                                "text": ("abcdef", "ab")})
+        [c] = self.body()
+        self.assertEqual(c["changes"]["price"], {"old": "1.50", "new": "2.00"})
+        self.assertEqual(c["changes"]["text"]["old"],
+                         {"$truncated": "abc", "length": 6})
+
 
 if __name__ == "__main__":
     unittest.main()

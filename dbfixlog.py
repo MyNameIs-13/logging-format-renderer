@@ -250,6 +250,14 @@ class JsonlHandler(logging.Handler):
 # Adapter returned by run().
 # --------------------------------------------------------------------------
 
+def _old_new(entry):
+    """One ``changes`` entry: an ``(old, new)`` pair becomes
+    ``{"old": ..., "new": ...}``; anything else is written as given."""
+    if isinstance(entry, (tuple, list)) and len(entry) == 2:
+        return {"old": entry[0], "new": entry[1]}
+    return entry
+
+
 class RunLogger(logging.LoggerAdapter):
     """Stdlib adapter: the usual methods plus ``fields=``.
 
@@ -283,8 +291,10 @@ class RunLogger(logging.LoggerAdapter):
             # _encode, so a raising __str__ never escapes the call.
             error = {"type": type(error).__name__, "message": error}
         data = {"type": "change", "msg": msg, "table": table, "op": op}
-        for k, v in (("key", key), ("label", label), ("status", status),
-                     ("error", error), ("fields", fields)):
+        if isinstance(changes, dict):
+            changes = {f: _old_new(v) for f, v in changes.items()}
+        for k, v in (("key", key), ("label", label), ("changes", changes),
+                     ("status", status), ("error", error), ("fields", fields)):
             if v is not None:
                 data[k] = v
         if level is None:
