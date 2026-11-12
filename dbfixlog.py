@@ -201,6 +201,9 @@ def _record_from_logrecord(record):
     data = dict(data)
     rtype = data.pop("type", "message")
     scope = data.pop("scope", None)
+    src = data.pop("src", None)
+    if src is None:
+        src = "%s:%d" % (os.path.basename(record.pathname), record.lineno)
     if "msg" in data:
         msg = data.pop("msg")
     else:
@@ -208,8 +211,7 @@ def _record_from_logrecord(record):
     exc_info = record.exc_info if record.exc_info and record.exc_info[0] else None
     return _build_record(
         record.created, record.levelname, record.name, rtype,
-        src="%s:%d" % (os.path.basename(record.pathname), record.lineno),
-        msg=msg, exc_info=exc_info, extra=data, scope=scope,
+        src=src, msg=msg, exc_info=exc_info, extra=data, scope=scope,
     )
 
 
@@ -266,6 +268,27 @@ class RunLogger(logging.LoggerAdapter):
             extra[ATTR] = data
             kwargs["extra"] = extra
         return msg, kwargs
+
+    def change(self, table, op, *, key=None, label=None, changes=None,
+               msg=None, status=None, error=None, level=None, fields=None):
+        """Log one row operation as a Change (SPEC 3.3, 4.3)."""
+        run = _active_run()
+        if status is None and run is not None:
+            status = "planned" if run.mode == "dry" else "applied"
+        data = {"type": "change", "msg": msg, "table": table, "op": op}
+        for k, v in (("key", key), ("label", label), ("status", status),
+                     ("fields", fields)):
+            if v is not None:
+                data[k] = v
+        if level is None:
+            level = logging.INFO
+        self._typed(level, "%s %s" % (op, table), data, _caller(1)[0])
+
+    def _typed(self, level, text, data, src):
+        # Typed methods live in this file, so findCaller would stamp
+        # dbfixlog.py: the caller's src is passed through ATTR instead.
+        data["src"] = src
+        self.logger.log(level, "%s", text, extra={ATTR: data})
 
     @property
     def dry_run(self):
