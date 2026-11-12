@@ -3,6 +3,7 @@
 Python 3.6.3+, stdlib only. See .scratch/db-fix-logging/SPEC.md.
 """
 
+import datetime
 import json
 import logging
 import os
@@ -43,7 +44,13 @@ def _encode(value, run=None):
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, float):
+        if value != value:
+            return "NaN"
+        if value in (float("inf"), float("-inf")):
+            return "Infinity" if value > 0 else "-Infinity"
         return value
+    if isinstance(value, (datetime.date, datetime.time)):
+        return value.isoformat()
     if isinstance(value, dict):
         return {str(k): _encode(v, run) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
