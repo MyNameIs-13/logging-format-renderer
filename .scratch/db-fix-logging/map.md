@@ -23,6 +23,8 @@ A spec, ready to hand off for building, for (1) a Python stdlib-`logging`-based 
 
 ## Decisions so far
 
+- [Prior-art survey for structured logs → HTML](issues/01-prior-art-survey.md): nothing does this end to end; use plain stdlib `logging` (ContextVar + Filter for Scopes); learn from Eliot (start/end records, sequence numbers) and pytest-html (embedded JSON blob + JS)
+
 ## Not yet specified
 
 - **Dry Run vs Write Run comparison**: whether/how a Report can relate a Write Run to the Dry Run that preceded it (did everything planned get applied?). Hangs on the Run Header (run identity) and Change schema.

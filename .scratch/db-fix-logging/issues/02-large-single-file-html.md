@@ -1,7 +1,7 @@
 # Making 100k records usable in one HTML file
 
 Type: research
-Status: open
+Status: claimed
 Blocked by:
 
 ## Question
