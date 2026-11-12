@@ -64,3 +64,24 @@ test("sticky Scopes are the Scopes enclosing the rows they cover", () => {
   assert.deepStrictEqual(R.stickyScopes(m, rows, 8), [5]);
   assert.deepStrictEqual(R.stickyScopes(m, rows, 99), []);
 });
+
+function memStorage(init) {
+  const data = Object.assign({}, init);
+  return { getItem: (k) => (k in data ? data[k] : null), setItem: (k, v) => { data[k] = String(v); }, data };
+}
+
+test("column widths are remembered, and bad or missing storage falls back to defaults", () => {
+  const s = memStorage();
+  assert.deepStrictEqual(R.loadWidths(s), R.DEFAULT_WIDTHS);
+  const w = [100, 210, 90, 60, 120, 160, 140, 500];
+  R.saveWidths(s, w);
+  assert.deepStrictEqual(R.loadWidths(s), w);
+  const bad = (v) => { const o = {}; o[R.WIDTHS_KEY] = v; return memStorage(o); };
+  assert.deepStrictEqual(R.loadWidths(bad("[1,2]")), R.DEFAULT_WIDTHS);
+  assert.deepStrictEqual(R.loadWidths(bad("nope")), R.DEFAULT_WIDTHS);
+  assert.deepStrictEqual(R.loadWidths(bad('[1,2,3,4,5,6,7,"x"]')), R.DEFAULT_WIDTHS);
+  const throwing = { getItem() { throw new Error("denied"); }, setItem() { throw new Error("denied"); } };
+  assert.deepStrictEqual(R.loadWidths(throwing), R.DEFAULT_WIDTHS);
+  R.saveWidths(throwing, w); // does not throw
+  assert.deepStrictEqual(R.loadWidths(null), R.DEFAULT_WIDTHS);
+});

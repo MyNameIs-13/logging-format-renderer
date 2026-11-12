@@ -470,6 +470,23 @@ function stickyScopes(m, rows, k) {
   return path;
 }
 
+// Column widths are remembered per browser. Storage may be missing or throw (private
+// windows, blocked site data), so both directions fall back quietly.
+const WIDTHS_KEY = "dbfixlog-report-widths";
+
+function loadWidths(storage) {
+  try {
+    const w = JSON.parse(storage.getItem(WIDTHS_KEY));
+    if (Array.isArray(w) && w.length === DEFAULT_WIDTHS.length &&
+        w.every((x) => typeof x === "number" && x > 0 && isFinite(x))) return w;
+  } catch (e) { /* fall through */ }
+  return DEFAULT_WIDTHS.slice();
+}
+
+function saveWidths(storage, widths) {
+  try { storage.setItem(WIDTHS_KEY, JSON.stringify(widths)); } catch (e) { /* not remembered */ }
+}
+
 // ---------------------------------------------------------------------------------------
 // DOM (browser only)
 // ---------------------------------------------------------------------------------------
@@ -626,5 +643,5 @@ if (typeof module !== "undefined") module.exports = {
   decodePayload, buildModel, modeStrip, runNotices, isEntry, isHeader, isRow, treeRows, flatRows,
   rowCells, rowClass, valueHTML, scopeName, hms, duration, esc, LEVELS, COLUMNS,
   // ticket 10
-  foldSet, stickyScopes,
+  foldSet, stickyScopes, loadWidths, saveWidths, WIDTHS_KEY, DEFAULT_WIDTHS,
 };
