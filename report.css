@@ -86,3 +86,28 @@ td { padding: 1px 8px 1px 0; text-align: left; vertical-align: top; }
 .null { font: 600 10px var(--mono); color: #9aa3ad; border: 1px solid #d5dae0; border-radius: 3px; padding: 0 3px; }
 .empty { font-size: 11px; color: #9aa3ad; font-style: italic; }
 .mark { font: 600 10px system-ui; color: #8a5a00; background: #fff1cc; border-radius: 3px; padding: 0 4px; }
+
+/* Ticket 10: list beside the details panel, sticky Scopes, resize handles, fold buttons. */
+.main { flex: 1; display: flex; min-height: 0; }
+.main .listwrap { min-width: 0; position: relative; }
+.vr { cursor: pointer; }
+.vr.sel, .vr.sel:hover { background: var(--sel); }
+.panel { flex: none; width: 440px; max-width: 50vw; overflow: auto; position: relative; padding: 10px 14px; border-left: 1px solid var(--line); background: var(--bg); }
+.panel[hidden] { display: none; }
+.panel .close { position: absolute; right: 8px; top: 8px; border: 0; background: none; color: var(--dim); font-size: 14px; cursor: pointer; }
+.detail h3 { margin: 0 24px 6px 0; font-size: 14px; }
+.detail section { margin: 10px 0; }
+.detail .k { color: var(--dim); width: 110px; }
+.detail th { font: 600 11px system-ui; color: var(--dim); text-align: left; padding-right: 8px; }
+.detail .crumb { margin-bottom: 6px; }
+.detail pre { background: var(--soft); padding: 8px; overflow: auto; font: 11.5px var(--mono); max-height: 320px; white-space: pre-wrap; margin: 4px 0; }
+.detail summary { cursor: pointer; margin-top: 8px; }
+.stick { position: absolute; left: 0; overflow: hidden; z-index: 1; box-shadow: 0 2px 4px rgba(0, 0, 0, .08); }
+.stick:empty { display: none; }
+.stick .sinner { position: relative; width: max(100%, var(--tw)); }
+.stick .vr { width: max(100%, var(--tw)); }
+.hc { position: relative; }
+.hc .rz { position: absolute; right: 0; top: 0; bottom: 0; width: 6px; padding: 0; cursor: col-resize; }
+.hc .rz:hover { background: var(--acc); opacity: .5; }
+#treetools { padding: 4px 14px; border-bottom: 1px solid var(--line); }
+#treetools button { font: 12px system-ui; margin-right: 4px; }

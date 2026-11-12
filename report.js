@@ -440,6 +440,151 @@ function isEntry(r) {
 }
 
 // ---------------------------------------------------------------------------------------
+// Folding, sticky Scopes, details panel, column widths (pure; ticket 10)
+// ---------------------------------------------------------------------------------------
+
+// The collapsed set for a fold button: "all" folds every Scope, "phases" folds every entity
+// Scope (one with a key) so the phases stay open, "none" expands all.
+function foldSet(m, how) {
+  const out = new Set();
+  if (how !== "all" && how !== "phases") return out;
+  for (const s of m.scopes.values()) {
+    if (how === "all" || m.records[s.start].key !== undefined) out.add(s.id);
+  }
+  return out;
+}
+
+// Tree mode sticky Scopes for a list scrolled so that rows[k] is the top row. The pinned
+// rows overlay the list, so pinned row d covers rows[k + d]: it is the depth-d Scope that
+// encloses rows[k + d]. Stops at the first covered row that is not that deep.
+function stickyScopes(m, rows, k) {
+  const path = [];
+  for (let d = 0; k + d < rows.length; d++) {
+    const p = m.records[rows[k + d]].scope;
+    if (!Array.isArray(p) || p.length <= d) break;
+    let same = true;
+    for (let j = 0; j < d; j++) if (p[j] !== path[j]) same = false;
+    if (!same) break;
+    path.push(p[d]);
+  }
+  return path;
+}
+
+// Column widths are remembered per browser. Storage may be missing or throw (private
+// windows, blocked site data), so both directions fall back quietly.
+const WIDTHS_KEY = "dbfixlog-report-widths";
+
+function loadWidths(storage) {
+  try {
+    const w = JSON.parse(storage.getItem(WIDTHS_KEY));
+    if (Array.isArray(w) && w.length === DEFAULT_WIDTHS.length &&
+        w.every((x) => typeof x === "number" && x > 0 && isFinite(x))) return w;
+  } catch (e) { /* fall through */ }
+  return DEFAULT_WIDTHS.slice();
+}
+
+function saveWidths(storage, widths) {
+  try { storage.setItem(WIDTHS_KEY, JSON.stringify(widths)); } catch (e) { /* not remembered */ }
+}
+
+// Details panel content. Scope links carry data-reveal (reveal in the tree); the
+// "show only this Scope" link carries data-q="in:<id>" so it goes through report.onQuery.
+function crumbHTML(m, path) {
+  if (!Array.isArray(path) || !path.length) return '<div class="crumb dim">Run level</div>';
+  return '<div class="crumb">' + path.map((id) =>
+    '<a href="#" data-reveal="' + esc(id) + '">' + esc(scopeName(m, id)) + "</a>").join(" › ") + "</div>";
+}
+
+function kvRow(k, v) { return '<tr><td class="k">' + esc(k) + "</td><td>" + v + "</td></tr>"; }
+
+function fieldTableHTML(title, f) {
+  if (!isPlainObject(f) || !Object.keys(f).length) return "";
+  return "<section><b>" + esc(title) + '</b><table class="fieldtab">' +
+    Object.keys(f).map((k) => '<tr><td class="k mono">' + esc(k) + "</td><td>" + valueHTML(f[k]) + "</td></tr>").join("") +
+    "</table></section>";
+}
+
+function excHTML(exc) {
+  if (!isPlainObject(exc)) return "";
+  return '<section><b class="out-error">' + esc(exc.type || "") + ": " + esc(exc.message || "") + "</b>" +
+    '<pre class="tb">' + esc(exc.traceback || "") + "</pre></section>";
+}
+
+function rawHTML(title, r) {
+  return '<details class="rawbox"><summary class="dim">' + esc(title) + '</summary><pre class="raw">' +
+    esc(JSON.stringify(r, null, 2)) + "</pre></details>";
+}
+
+const RECORD_TITLES = { change: "Change", finding: "Finding", message: "Message", scope_end: "Scope error" };
+// Shown in their own sections (or the Scope path), not in the field table.
+const OWN_SECTIONS = { scope: 1, changes: 1, fields: 1, exc: 1, error: 1 };
+
+// Every field of record i, then field changes, error, fields, traceback and raw JSON.
+function recordDetailsHTML(m, i) {
+  const r = m.records[i];
+  let h = '<div class="detail"><h3>' + esc(RECORD_TITLES[r.type] || r.type) + " " + statusHTML(m, i) + "</h3>" +
+    crumbHTML(m, r.scope) + '<table class="facts">';
+  for (const k of Object.keys(r)) {
+    if (k in OWN_SECTIONS) continue;
+    const v = r[k];
+    if (k === "key" || k === "label") h += kvRow(k, pairsHTML(v));
+    else if (k === "ts" || k === "src" || k === "logger") h += kvRow(k, '<span class="mono">' + esc(v) + "</span>");
+    else h += kvRow(k, valueHTML(v));
+  }
+  h += kvRow("line", '<span class="mono">' + esc(m.lines[i]) + "</span>");
+  if (m.warn[i]) h += kvRow("warning", '<span class="out-error">⚠ ' + esc(m.warn[i]) + "</span>");
+  h += "</table>";
+  if (isPlainObject(r.changes)) {
+    h += '<section><b>Field changes</b><table class="fchanges">' +
+      '<thead><tr><th>field</th><th>old</th><th></th><th>new</th></tr></thead><tbody>' +
+      Object.keys(r.changes).map((f) => {
+        const c = isPlainObject(r.changes[f]) ? r.changes[f] : {};
+        return '<tr><td class="mono">' + esc(f) + "</td><td>" + valueHTML(c.old) +
+          '</td><td class="arrow">→</td><td>' + valueHTML(c.new) + "</td></tr>";
+      }).join("") + "</tbody></table></section>";
+  }
+  if (isPlainObject(r.error)) {
+    h += '<section><b class="out-error">' + esc(r.error.type) + "</b>: " + esc(r.error.message) + "</section>";
+  }
+  h += fieldTableHTML("Fields", r.fields) + excHTML(r.exc) + rawHTML("raw JSON", r);
+  return h + "</div>";
+}
+
+// A Scope row: its own fields, timing, outcome, totals and a "show only this Scope" link.
+function scopeDetailsHTML(m, id) {
+  const s = m.scopes.get(id);
+  const r = m.records[s.start];
+  const e = s.end !== null ? m.records[s.end] : null;
+  const t = s.totals;
+  const outcome = s.outcome === "ok" ? '<span class="out-ok">ok</span>' : statusHTML(m, s.start);
+  let h = '<div class="detail"><h3>Scope: ' + esc(scopeName(m, id)) + " " + outcome + "</h3>" +
+    crumbHTML(m, s.path) + '<table class="facts">' +
+    kvRow("kind", '<span class="mono">' + esc(r.kind) + "</span>") +
+    kvRow("key", r.key !== undefined ? pairsHTML(r.key) : '<span class="dim">phase (no key)</span>');
+  if (r.label !== undefined) h += kvRow("label", pairsHTML(r.label));
+  if (r.msg !== undefined) h += kvRow("msg", esc(r.msg));
+  h += kvRow("id", esc(id)) + kvRow("logger", '<span class="mono">' + esc(r.logger) + "</span>");
+  if (r.src !== undefined) h += kvRow("src", '<span class="mono">' + esc(r.src) + "</span>");
+  h += kvRow("started", '<span class="mono">' + esc(r.ts) + "</span>");
+  h += e ? kvRow("ended", '<span class="mono">' + esc(e.ts) + "</span>") + kvRow("duration", esc(duration(t.duration_ms)))
+    : kvRow("ended", '<span class="out-unfinished">unfinished</span> (no scope_end record)');
+  h += "</table>" +
+    '<section><b>Totals</b> <span class="dim">(the whole Scope)</span><table class="totals">' +
+    kvRow("records", esc(t.records)) + kvRow("planned", esc(t.planned)) +
+    kvRow("applied", '<span class="' + (t.applied && m.mode === "dry" ? "out-error" : "") + '">' + esc(t.applied) + "</span>") +
+    kvRow("failed", '<span class="' + (t.failed ? "out-error" : "") + '">' + esc(t.failed) + "</span>") +
+    kvRow("Findings", esc(t.findings)) + "</table></section>" +
+    '<p><a href="#" data-q="in:' + esc(id) + '">show only this Scope</a></p>' +
+    fieldTableHTML("Fields", r.fields) + (e ? excHTML(e.exc) : "") +
+    rawHTML("raw JSON (scope_start)", r) + (e ? rawHTML("raw JSON (scope_end)", e) : "");
+  return h + "</div>";
+}
+
+function detailsPanelHTML(m, i) {
+  return isHeader(m, i) ? scopeDetailsHTML(m, m.records[i].id) : recordDetailsHTML(m, i);
+}
+
+// ---------------------------------------------------------------------------------------
 // DOM (browser only)
 // ---------------------------------------------------------------------------------------
 
@@ -546,6 +691,166 @@ function createList(doc, wrap, m) {
   return list;
 }
 
+// ---------------------------------------------------------------------------------------
+// DOM: details panel, column resizing, sticky Scopes, fold buttons (ticket 10)
+// ---------------------------------------------------------------------------------------
+// installListTools(doc, app, report) wraps the list in .main next to an <aside class="panel">,
+// overlays .stick on the list, adds resize handles to the header cells and puts the fold
+// buttons in #treetools (the filter bar may adopt them). It adds to report:
+//   open(i)     show row i in the panel (a Scope header row shows the Scope)
+//   close()     hide the panel
+//   reveal(id)  switch to Tree mode, unfold the Scope's ancestors, scroll to it, open it
+//   fold(how)   "none" (expand all) / "phases" / "all"
+// and list.selected (the row shown in the panel, or null).
+
+function installListTools(doc, app, report) {
+  const m = report.model;
+  const list = report.list;
+  const win = doc.defaultView;
+  const wrap = app.querySelector(".listwrap");
+  const el = wrap.querySelector(".list");
+  const lhead = wrap.querySelector(".lhead");
+
+  const main = doc.createElement("div");
+  main.className = "main";
+  wrap.parentNode.insertBefore(main, wrap);
+  main.appendChild(wrap);
+  const panel = doc.createElement("aside");
+  panel.className = "panel";
+  panel.hidden = true;
+  main.appendChild(panel);
+  const tools = doc.createElement("div");
+  tools.id = "treetools";
+  tools.innerHTML = '<span class="treebtns">' +
+    '<button data-foldall="none" title="Expand all Scopes">Expand all</button>' +
+    '<button data-foldall="phases" title="Fold entity Scopes, keep phases open">Fold to phases</button>' +
+    '<button data-foldall="all" title="Fold all Scopes">Fold all</button></span>';
+  main.parentNode.insertBefore(tools, main);
+  const stick = doc.createElement("div");
+  stick.className = "stick";
+  wrap.appendChild(stick);
+
+  list.selected = null;
+  report.open = (i) => {
+    panel.innerHTML = '<button class="close" title="Close">✕</button>' + detailsPanelHTML(m, i);
+    panel.hidden = false;
+    panel.scrollTop = 0;
+    list.selected = i;
+    list.draw();
+  };
+  report.close = () => {
+    panel.hidden = true;
+    list.selected = null;
+    list.draw();
+  };
+  report.reveal = (id) => {
+    const s = m.scopes.get(id);
+    if (!s) return;
+    for (const p of s.path) list.collapsed.delete(p);
+    if (list.mode !== "tree") list.setMode("tree"); else list.refresh();
+    list.scrollToRecord(s.start);
+    report.open(s.start);
+  };
+  report.fold = (how) => {
+    list.collapsed = foldSet(m, how);
+    list.refresh();
+  };
+
+  // Jump so the Scope's header sits just below its own (pinned) parents.
+  function jumpTo(id) {
+    const s = m.scopes.get(id);
+    const k = list.rows.indexOf(s.start);
+    if (k < 0) return;
+    el.scrollTop = Math.max(0, (k - s.depth) * ROW_HEIGHT);
+    list.draw();
+  }
+
+  function drawSticky() {
+    stick.style.top = lhead.offsetHeight + "px";
+    stick.style.right = el.offsetWidth - el.clientWidth + "px";
+    const ids = list.mode === "tree" ? stickyScopes(m, list.rows, Math.floor(el.scrollTop / ROW_HEIGHT)) : [];
+    let h = "";
+    ids.forEach((id, d) => {
+      const i = m.scopes.get(id).start;
+      h += '<div class="vr grid srow ' + rowClass(m, i) + '" data-sid="' + id + '" style="top:' + d * ROW_HEIGHT + 'px">' +
+        rowCells(m, i, "tree", list.collapsed).map((c) => "<span>" + c + "</span>").join("") + "</div>";
+    });
+    stick.innerHTML = h ? '<div class="sinner" style="transform:translateX(' + -el.scrollLeft + 'px)">' + h + "</div>" : "";
+    stick.style.height = ids.length * ROW_HEIGHT + "px";
+  }
+
+  // Wrap draw (the list looks list.draw up on every call): mark the selection, pin Scopes.
+  const draw = list.draw;
+  list.draw = () => {
+    draw();
+    if (list.selected !== null) {
+      const r = el.querySelector('.vr[data-i="' + list.selected + '"]');
+      if (r) r.classList.add("sel");
+    }
+    drawSticky();
+  };
+
+  el.addEventListener("click", (e) => {
+    if (e.target.closest("[data-fold]")) return; // the caret folds (createList)
+    const r = e.target.closest(".vr[data-i]");
+    if (r) report.open(Number(r.dataset.i));
+  });
+  stick.addEventListener("click", (e) => {
+    const r = e.target.closest("[data-sid]");
+    if (!r) return;
+    const id = Number(r.dataset.sid);
+    if (e.target.closest("[data-fold]")) { list.collapsed.add(id); list.refresh(); }
+    jumpTo(id);
+  });
+  panel.addEventListener("click", (e) => {
+    if (e.target.closest(".close")) { report.close(); return; }
+    const a = e.target.closest("[data-reveal]");
+    if (a) { e.preventDefault(); report.reveal(Number(a.dataset.reveal)); }
+  });
+  tools.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-foldall]");
+    if (b) report.fold(b.dataset.foldall);
+  });
+
+  // Column resizing: drag a header edge, double-click it to reset; widths are remembered.
+  let storage = null;
+  try { storage = win.localStorage; } catch (e) { /* no storage */ }
+  const widths = loadWidths(storage);
+  const apply = () => { list.setWidths(widths); list.draw(); };
+  lhead.querySelectorAll(".hc").forEach((c) => {
+    const z = doc.createElement("span");
+    z.className = "rz";
+    z.dataset.rz = c.dataset.col;
+    z.title = "Drag to resize, double-click to reset";
+    c.appendChild(z);
+  });
+  lhead.addEventListener("pointerdown", (e) => {
+    const z = e.target.closest(".rz");
+    if (!z) return;
+    e.preventDefault();
+    const c = Number(z.dataset.rz);
+    const x0 = e.clientX;
+    const w0 = widths[c];
+    const move = (ev) => { widths[c] = Math.max(32, Math.round(w0 + ev.clientX - x0)); apply(); };
+    const up = () => {
+      win.removeEventListener("pointermove", move);
+      win.removeEventListener("pointerup", up);
+      saveWidths(storage, widths);
+    };
+    win.addEventListener("pointermove", move);
+    win.addEventListener("pointerup", up);
+  });
+  lhead.addEventListener("dblclick", (e) => {
+    const z = e.target.closest(".rz");
+    if (!z) return;
+    const c = Number(z.dataset.rz);
+    widths[c] = DEFAULT_WIDTHS[c];
+    apply();
+    saveWidths(storage, widths);
+  });
+  list.setWidths(widths);
+}
+
 function renderReport(doc, app, payload) {
   const m = buildModel(payload);
   app.innerHTML = '<div class="report">' + runHeaderHTML(m) +
@@ -561,9 +866,10 @@ function renderReport(doc, app, payload) {
       if (q === "is:warn" && m.warnings.length) list.scrollToRecord(m.warnings[0]);
       else if (q === "is:unfinished" && m.unfinishedScopes.length) {
         list.scrollToRecord(m.scopes.get(m.unfinishedScopes[0]).start);
-      }
+      } else if (/^in:\d+$/.test(q)) report.reveal(Number(q.slice(3))); // "show only this Scope"
     },
   };
+  installListTools(doc, app, report);
   app.addEventListener("click", (e) => {
     const a = e.target.closest("[data-q]");
     if (!a) return;
@@ -594,4 +900,6 @@ if (typeof document !== "undefined") startReport(document);
 if (typeof module !== "undefined") module.exports = {
   decodePayload, buildModel, modeStrip, runNotices, isEntry, isHeader, isRow, treeRows, flatRows,
   rowCells, rowClass, valueHTML, scopeName, hms, duration, esc, LEVELS, COLUMNS,
+  // ticket 10
+  foldSet, stickyScopes, loadWidths, saveWidths, WIDTHS_KEY, DEFAULT_WIDTHS,
 };
