@@ -21,7 +21,7 @@ Implementation tickets for [SPEC.md](../SPEC.md). They form a task graph. A tick
 - **Files at the repo root:** `dbfixlog.py`, `dbfixlog_render.py`, `report.js`, `report.css`. Tests go in `tests/`.
 - **Python tests:** stdlib `unittest` only, run with `python3 -m unittest discover -s tests`. There is no pytest and no third-party package.
 - **JS logic tests:**
-  - `node --test tests/js/`.
+  - `node --test tests/js/*.test.js` (a bare `tests/js/` directory argument fails on Node 24).
   - `report.js` stays one plain script with no modules and no build step. Pure functions (query parser, filters, model) are exposed for Node with `if (typeof module !== "undefined") module.exports = {...}`.
 - **Browser checks:** headless Firefox (`firefox --headless`) on a rendered Report opened from `file://`.
 - **Python 3.6.3 compatibility:** this machine has no 3.6 interpreter and no Docker. `tests/test_py36_compat.py` (added in ticket 01) parses both Python files and fails on known 3.7+ constructs and imports. Running the suite under real Python 3.6 is still owed (SPEC §2).
