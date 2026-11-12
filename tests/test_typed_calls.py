@@ -314,5 +314,43 @@ class GetLoggerTest(TypedCallTestCase):
         self.assertIs(log.logger, logging.getLogger("shop.fixes"))
 
 
+class _Capture(logging.Handler):
+    def __init__(self):
+        logging.Handler.__init__(self)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+class OutsideRunTest(unittest.TestCase):
+    def test_typed_calls_fall_back_to_plain_logging(self):
+        logger = logging.getLogger("outside.run")
+        cap = _Capture()
+        logger.addHandler(cap)
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        self.addCleanup(logger.removeHandler, cap)
+        self.addCleanup(setattr, logger, "propagate", True)
+        log = dbfixlog.get_logger("outside.run")
+
+        log.change("orders", "delete", key={"id": 156})
+        log.change("orders", "delete", key=156)
+        log.finding("orphan-order", "no customer")
+        with log.scope("customer", key={"id": 42}):
+            log.info("inside")
+
+        self.assertEqual(
+            [(r.levelname, r.getMessage()) for r in cap.records],
+            [("INFO", "delete orders"),
+             ("INFO", "delete orders"),
+             ("WARNING", "invalid change call: key must be a {column: value} "
+                         "object, got int 156"),
+             ("WARNING", "orphan-order: no customer"),
+             ("INFO", "inside")])
+        self.assertFalse(log.dry_run)
+        self.assertFalse(log.write_run)
+
+
 if __name__ == "__main__":
     unittest.main()
