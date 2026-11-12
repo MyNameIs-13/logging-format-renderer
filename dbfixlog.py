@@ -1,6 +1,6 @@
 """dbfixlog: stdlib-logging writer for Database Fix Log Files (JSON Lines).
 
-Python 3.6.3+, stdlib only. See .scratch/db-fix-logging/SPEC.md.
+Python 3.6.3+, stdlib only.
 """
 
 import datetime
@@ -19,7 +19,8 @@ __version__ = "0.1.0"
 FORMAT_VERSION = "1.0"
 LOGGER_NAME = "dbfixlog"
 
-# The one namespaced LogRecord attribute that carries typed fields (SPEC 4.6).
+# The one namespaced LogRecord attribute that carries typed fields, so they
+# never clash with the stdlib's own LogRecord attributes.
 # Pass it as ``extra={ATTR: {...}}``; its keys are merged into the record dict.
 ATTR = "dbfixlog"
 
@@ -39,10 +40,10 @@ def _active_run():
 
 
 # --------------------------------------------------------------------------
-# Value encoding (SPEC 3.5).
+# Value encoding.
 # --------------------------------------------------------------------------
 
-# Record slots that hold logged *values*: they get the full SPEC 3.5
+# Record slots that hold logged *values*: they get the full value
 # encoding, including ``max_text`` truncation. Every other slot (msg,
 # Run Header fields, exc, ...) is only made JSON-safe.
 VALUE_SLOTS = ("key", "label", "fields", "changes")
@@ -52,7 +53,7 @@ BYTES_PREFIX = 64
 
 
 def _encode(value, run=None, truncate=True, _open=None):
-    """Return ``value`` in JSON-safe form, for display (SPEC 3.5).
+    """Return ``value`` in JSON-safe form, for display.
 
     This is the single place that turns a Python value into something
     ``json.dumps(..., allow_nan=False)`` accepts. ``run`` carries the
@@ -156,6 +157,17 @@ def _str_or_unencodable(value, run):
         return str(value)
     except Exception as e:
         return _unencodable(value, e, run)
+
+
+def _raise_if_strict(run):
+    """Inside an ``except`` block: re-raise the exception under strict."""
+    if run is not None and run.strict:
+        raise
+
+
+def _given(**values):
+    """The keyword arguments that are not None, in order."""
+    return {k: v for k, v in values.items() if v is not None}
 
 
 def _unencodable(value, error, run):
@@ -276,13 +288,12 @@ class JsonlHandler(logging.Handler):
         try:
             self.write_dict(_record_from_logrecord(record))
         except Exception:
-            if self.run is not None and self.run.strict:
-                raise
+            _raise_if_strict(self.run)
             self.handleError(record)
 
 
 # --------------------------------------------------------------------------
-# Console handler (SPEC 4.5).
+# Console handler.
 # --------------------------------------------------------------------------
 
 def _show(value):
@@ -338,8 +349,7 @@ class ConsoleHandler(logging.Handler):
             self._line(record.created, record.levelno, record.levelname,
                        data.get("scope"), body)
         except Exception:
-            if self.run is not None and self.run.strict:
-                raise
+            _raise_if_strict(self.run)
             self.handleError(record)
 
     def write_scope(self, rec, levelno):
@@ -360,8 +370,7 @@ class ConsoleHandler(logging.Handler):
             self._line(time.time(), levelno, rec["level"], rec.get("scope"),
                        body)
         except Exception:
-            if self.run is not None and self.run.strict:
-                raise
+            _raise_if_strict(self.run)
 
     def _line(self, created, levelno, levelname, path, body):
         if levelno < self.level:
@@ -418,7 +427,7 @@ OPS = ("update", "insert", "delete")
 
 
 def _change_misuse(op, key, changes):
-    """What is wrong with a ``change(...)`` call (SPEC 4.3), or None."""
+    """What is wrong with a ``change(...)`` call, or None."""
     if op not in OPS:
         return "unknown op %r (expected update, insert or delete)" % (op,)
     if op == "update" and not changes:
@@ -440,13 +449,8 @@ def _old_new(entry):
 
 
 class RunLogger(logging.LoggerAdapter):
-    """Stdlib adapter: the usual methods plus ``fields=``.
-
-    Typed calls (finding, change, scope) are added by later tickets.
-    """
-
-    def __init__(self, logger, extra=None):
-        logging.LoggerAdapter.__init__(self, logger, extra or {})
+    """Stdlib adapter: the usual methods plus ``fields=``, and the typed
+    calls ``change``, ``finding`` and ``scope``."""
 
     def process(self, msg, kwargs):
         fields = kwargs.pop("fields", None)
@@ -460,7 +464,7 @@ class RunLogger(logging.LoggerAdapter):
 
     def change(self, table, op, *, key=None, label=None, changes=None,
                msg=None, status=None, error=None, level=None, fields=None):
-        """Log one row operation as a Change (SPEC 3.3, 4.3)."""
+        """Log one row operation as a Change."""
         run = _active_run()
         src = _caller(1)[0]
         problem = _change_misuse(op, key, changes)
@@ -478,13 +482,9 @@ class RunLogger(logging.LoggerAdapter):
         data = {"type": "change", "msg": msg, "table": table, "op": op}
         if isinstance(changes, dict):
             changes = {f: _old_new(v) for f, v in changes.items()}
-        for k, v in (("key", key), ("label", label), ("changes", changes),
-                     ("status", status), ("error", error), ("fields", fields)):
-            if v is not None:
-                data[k] = v
+        data.update(_given(key=key, label=label, changes=changes,
+                           status=status, error=error, fields=fields))
         if level is None:
-            # An explicit status= overrides the status only: a Change that
-            # carries an error is still logged at ERROR.
             failed = status == "failed" or error is not None
             level = logging.ERROR if failed else logging.INFO
         self._typed(level, "%s %s" % (op, table), data, src)
@@ -494,17 +494,14 @@ class RunLogger(logging.LoggerAdapter):
 
     def finding(self, check, msg=None, *, table=None, key=None, label=None,
                 level=logging.WARNING, fields=None):
-        """Log a Finding: ``check`` is the stable rule name (SPEC 3.3, 4.3)."""
+        """Log a Finding: ``check`` is the stable rule name."""
         data = {"type": "finding", "msg": msg, "check": check}
-        for k, v in (("table", table), ("key", key), ("label", label),
-                     ("fields", fields)):
-            if v is not None:
-                data[k] = v
+        data.update(_given(table=table, key=key, label=label, fields=fields))
         text = check if msg is None else "%s: %s" % (check, msg)
         self._typed(level, text, data, _caller(1)[0])
 
     def scope(self, kind, *, key=None, label=None, msg=None, fields=None):
-        """Open a Scope stamped with this logger's name (SPEC 3.4, 4.3)."""
+        """Open a Scope stamped with this logger's name."""
         return _Scope(kind, key, label, msg, fields, _caller(1)[0],
                       self.logger.name)
 
@@ -531,11 +528,11 @@ def get_logger(name):
     It finds the active Run at call time, so it may be created at import
     time, before any Run is open.
     """
-    return RunLogger(logging.getLogger(name))
+    return RunLogger(logging.getLogger(name), {})
 
 
 # --------------------------------------------------------------------------
-# Scopes (SPEC 3.4, 4.6).
+# Scopes.
 # --------------------------------------------------------------------------
 
 def _scope_path(run):
@@ -570,14 +567,14 @@ class _Scope(object):
     """One ``scope(...)`` use: a context manager, or a decorator that opens
     a fresh Scope with the same static arguments on every call."""
 
-    def __init__(self, kind, key, label, msg, fields, src, logger):
+    def __init__(self, kind, key, label, msg, fields, src, logger_name):
         self.kind = kind
         self.key = key
         self.label = label
         self.msg = msg
         self.fields = fields
         self.src = src
-        self.logger = logger
+        self.logger_name = logger_name
         self.run = None
 
     def __call__(self, func):
@@ -585,7 +582,7 @@ class _Scope(object):
         def wrapper(*args, **kwargs):
             src, _ = _caller(1)
             with _Scope(self.kind, self.key, self.label, self.msg,
-                        self.fields, src, self.logger):
+                        self.fields, src, self.logger_name):
                 return func(*args, **kwargs)
         return wrapper
 
@@ -598,10 +595,7 @@ class _Scope(object):
         self.parent = list(_scope_path(run))
         self.start = time.time()
         extra = {"id": self.id, "kind": self.kind}
-        for k in ("key", "label", "fields"):
-            v = getattr(self, k)
-            if v is not None:
-                extra[k] = v
+        extra.update(_given(key=self.key, label=self.label, fields=self.fields))
         run.scope_labels[self.id] = _safe(
             lambda: scope_label(self.kind, self.key, self.label),
             str(self.kind))
@@ -629,13 +623,12 @@ class _Scope(object):
     def _write(self, created, level, rtype, **kw):
         # Always written, whatever the configured level. Never raises
         # unless the Run is strict.
-        rec = _build_record(created, level, self.logger, rtype, src=self.src,
+        rec = _build_record(created, level, self.logger_name, rtype, src=self.src,
                             scope=self.parent, **kw)
         try:
             self.run.handler.write_dict(rec)
         except Exception:
-            if self.run.strict:
-                raise
+            _raise_if_strict(self.run)
         if self.run.console_handler is not None:
             self.run.console_handler.write_scope(
                 rec, logging.ERROR if level == "ERROR" else logging.INFO)
@@ -724,13 +717,11 @@ class _Run(object):
             if root.level > lowest or root.level == logging.NOTSET:
                 root.setLevel(lowest)
             header = {"format": FORMAT_VERSION, "mode": self.mode}
-            for k in ("title", "description", "target", "fields"):
-                v = getattr(self, k)
-                if v is not None:
-                    header[k] = v
+            header.update(_given(title=self.title, description=self.description,
+                                 target=self.target, fields=self.fields))
             self.handler.write_dict(_build_record(
                 self.start, "INFO", LOGGER_NAME, "run_start", extra=header))
-            self.log = RunLogger(logging.getLogger("__main__"))
+            self.log = RunLogger(logging.getLogger("__main__"), {})
         except BaseException:
             self._teardown()
             raise
@@ -786,7 +777,7 @@ def _refuse_nested(attached, run=None):
 
 def run(path, *, mode, title=None, description=None, target=None, fields=None,
         level=logging.DEBUG, console=logging.INFO, encoders=None, strict=False,
-        max_text=1000, overwrite=False):
+        max_text=DEFAULT_MAX_TEXT, overwrite=False):
     """Open a Run: ``with dbfixlog.run(path, mode="dry") as log: ...``."""
     return _Run(path, mode, title, description, target, fields, level,
                 console, encoders, strict, max_text, overwrite)
