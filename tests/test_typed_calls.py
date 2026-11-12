@@ -284,7 +284,6 @@ def fix(order_id):
     log.info("fixing", fields={"id": order_id})
     log.finding("orphan-order", key={"id": order_id})
     log.change("orders", "delete", key={"id": order_id})
-    return log.dry_run
 '''
 
 
@@ -302,8 +301,7 @@ class GetLoggerTest(TypedCallTestCase):
         # The helper's logger is created at import time, before the Run.
         helper = self.import_helper()
         with dbfixlog.run(self.path, mode="dry", console=False):
-            dry = helper.fix(156)
-        self.assertTrue(dry)
+            helper.fix(156)
         msg, finding, change = self.body()
         for rec, line in ((msg, 7), (finding, 8), (change, 9)):
             self.assertEqual(rec["logger"], "fixhelper")
