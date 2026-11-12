@@ -247,6 +247,136 @@ class JsonlHandler(logging.Handler):
 
 
 # --------------------------------------------------------------------------
+# Console handler (SPEC 4.5).
+# --------------------------------------------------------------------------
+
+def _show(value):
+    """A value as console text: strings bare, everything else ``str()``."""
+    if value is None:
+        return "null"
+    if isinstance(value, dict):
+        return "{%s}" % ",".join("%s:%s" % (k, _show(v))
+                                 for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return "[%s]" % ",".join(_show(v) for v in value)
+    return str(value)
+
+
+def _show_values(value):
+    """``{"id": 42}`` -> ``42``: the values of a key/label, space-joined."""
+    if isinstance(value, dict):
+        return " ".join(_show(v) for v in value.values())
+    return _show(value)
+
+
+def scope_label(kind, key=None, label=None):
+    """The console label of a Scope: ``customer 42 ACME``."""
+    parts = [str(kind)]
+    for v in (key, label):
+        if v is not None:
+            parts.append(_show_values(v))
+    return " ".join(p for p in parts if p)
+
+
+class ConsoleHandler(logging.Handler):
+    """The terse stderr view: one line per record, prefixed by the label
+    of the innermost Scope. Changes and Findings are summarised from their
+    ATTR fields; Messages use the stdlib message text. No colours."""
+
+    def __init__(self, stream, run, level=logging.INFO):
+        logging.Handler.__init__(self, level)
+        self.stream = stream
+        self.run = run
+        self.setFormatter(logging.Formatter())
+
+    def emit(self, record):
+        try:
+            data = getattr(record, ATTR, None) or {}
+            rtype = data.get("type")
+            if rtype == "change":
+                body = self._change(data)
+            elif rtype == "finding":
+                body = self._finding(data)
+            else:
+                body = record.getMessage()
+                if record.exc_info:
+                    body += "\n" + self.formatter.formatException(
+                        record.exc_info)
+            self._line(record.created, record.levelno, record.levelname,
+                       data.get("scope"), body)
+        except Exception:
+            if self.run is not None and self.run.strict:
+                raise
+            self.handleError(record)
+
+    def write_scope(self, rec, levelno):
+        """Console line for a scope_start (always) or an error scope_end."""
+        try:
+            label = self.run.scope_labels.get(rec["id"], "")
+            if rec["type"] == "scope_start":
+                body = "start " + label
+            elif rec.get("outcome") == "error":
+                exc = rec.get("exc") or {}
+                body = "end %s error" % label
+                if exc:
+                    body += ": %s: %s" % (exc.get("type"), exc.get("message"))
+            else:
+                return
+            if rec.get("msg") is not None:
+                body += " - %s" % rec["msg"]
+            self._line(time.time(), levelno, rec["level"], rec.get("scope"),
+                       body)
+        except Exception:
+            if self.run is not None and self.run.strict:
+                raise
+
+    def _line(self, created, levelno, levelname, path, body):
+        if levelno < self.level:
+            return
+        prefix = time.strftime("%H:%M:%S", time.localtime(created))
+        prefix += " %-5s " % levelname
+        if path:
+            label = self.run.scope_labels.get(path[-1])
+            if label:
+                prefix += label + " › "
+        self.acquire()
+        try:
+            self.stream.write(prefix + body + "\n")
+            self.stream.flush()
+        finally:
+            self.release()
+
+    @staticmethod
+    def _row(data):
+        parts = []
+        for k in ("table", "key", "label"):
+            v = data.get(k)
+            if v is not None:
+                parts.append(_show_values(v) if k == "label" else _show(v))
+        return parts
+
+    def _change(self, data):
+        parts = [str(data.get("op"))] + self._row(data)
+        if data.get("status") is not None:
+            parts.append(str(data["status"]))
+        error = data.get("error")
+        if error:
+            parts[-1] += ":"
+            parts.append("%s: %s" % (error.get("type"), error.get("message")))
+        return self._with_msg(" ".join(parts), data)
+
+    def _finding(self, data):
+        parts = [str(data.get("check"))] + self._row(data)
+        return self._with_msg(" ".join(parts), data)
+
+    @staticmethod
+    def _with_msg(text, data):
+        if data.get("msg") is not None:
+            text += " - %s" % data["msg"]
+        return text
+
+
+# --------------------------------------------------------------------------
 # Adapter returned by run().
 # --------------------------------------------------------------------------
 
@@ -433,6 +563,9 @@ class _Scope(object):
             v = getattr(self, k)
             if v is not None:
                 extra[k] = v
+        run.scope_labels[self.id] = _safe(
+            lambda: scope_label(self.kind, self.key, self.label),
+            str(self.kind))
         self._write(self.start, "INFO", "scope_start", msg=self.msg,
                     extra=extra)
         _scope_state.path = self.parent + [self.id]
@@ -457,13 +590,23 @@ class _Scope(object):
     def _write(self, created, level, rtype, **kw):
         # Always written, whatever the configured level. Never raises
         # unless the Run is strict.
+        rec = _build_record(created, level, self.logger, rtype, src=self.src,
+                            scope=self.parent, **kw)
         try:
-            self.run.handler.write_dict(_build_record(
-                created, level, self.logger, rtype, src=self.src,
-                scope=self.parent, **kw))
+            self.run.handler.write_dict(rec)
         except Exception:
             if self.run.strict:
                 raise
+        if self.run.console_handler is not None:
+            self.run.console_handler.write_scope(
+                rec, logging.ERROR if level == "ERROR" else logging.INFO)
+
+
+def _safe(fn, default):
+    try:
+        return fn()
+    except Exception:
+        return default
 
 
 def scope(kind, *, key=None, label=None, msg=None, fields=None):
@@ -476,6 +619,15 @@ def scope(kind, *, key=None, label=None, msg=None, fields=None):
 # --------------------------------------------------------------------------
 # run()
 # --------------------------------------------------------------------------
+
+def _console_level(console):
+    """``console=`` as a level, or None when the console is off."""
+    if console is None or console is False:
+        return None
+    if console is True:
+        return logging.INFO
+    return console
+
 
 class _Run(object):
     def __init__(self, path, mode, title, description, target, fields,
@@ -495,6 +647,8 @@ class _Run(object):
         self.max_text = max_text
         self.overwrite = overwrite
         self.handler = None
+        self.console_handler = None
+        self.scope_labels = {}  # Scope id -> console label
         self.stream = None
         self.log = None
         self._scope_ids = 0
@@ -522,8 +676,16 @@ class _Run(object):
             root = logging.getLogger()
             self._root_level = root.level
             root.addHandler(self.handler)
-            if root.level > self.level or root.level == logging.NOTSET:
-                root.setLevel(self.level)
+            lowest = self.level
+            console = _console_level(self.console)
+            if console is not None:
+                self.console_handler = ConsoleHandler(sys.stderr, self,
+                                                      console)
+                self.console_handler.addFilter(ScopeFilter())
+                root.addHandler(self.console_handler)
+                lowest = min(lowest, console)
+            if root.level > lowest or root.level == logging.NOTSET:
+                root.setLevel(lowest)
             header = {"format": FORMAT_VERSION, "mode": self.mode}
             for k in ("title", "description", "target", "fields"):
                 v = getattr(self, k)
@@ -573,6 +735,9 @@ class _Run(object):
             root.removeHandler(self.handler)
             root.setLevel(self._root_level)
             self.handler.close()
+        if self.console_handler is not None:
+            root.removeHandler(self.console_handler)
+            self.console_handler.close()
         if self.stream is not None:
             self.stream.close()
         with _lock:
