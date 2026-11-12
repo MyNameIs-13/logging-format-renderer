@@ -159,6 +159,67 @@ class ValueTest(unittest.TestCase):
                 log.info("v", fields={"v": Bad()})
         self.assertEqual(self.messages(), [])
 
+    def test_custom_encoders_take_precedence(self):
+        enc = {decimal.Decimal: float,
+               datetime.datetime: lambda d: d.strftime("%Y%m%d%H%M%S")}
+        v = self.logged({"d": decimal.Decimal("12.30"),
+                         "t": datetime.datetime(2026, 11, 22, 5, 35, 50)},
+                        encoders=enc)
+        self.assertEqual(v, {"d": 12.3, "t": "20261122053550"})
+
+    def test_custom_encoder_applies_to_subclasses(self):
+        class Money(decimal.Decimal):
+            pass
+        v = self.logged(Money("1.50"),
+                        encoders={decimal.Decimal: lambda d: {"eur": str(d)}})
+        self.assertEqual(v, {"eur": "1.50"})
+
+    def test_custom_encoder_result_is_encoded_again(self):
+        class Blob(object):
+            pass
+        v = self.logged(Blob(), encoders={Blob: lambda b: float("nan")})
+        self.assertEqual(v, "NaN")
+
+    def test_failing_custom_encoder_gives_unencodable(self):
+        class Blob(object):
+            def __repr__(self):
+                return "<Blob>"
+
+        def boom(b):
+            raise RuntimeError("no")
+        self.assertEqual(self.logged(Blob(), encoders={Blob: boom}),
+                         {"$unencodable": "<Blob>"})
+
+    def test_none_valued_keys_are_never_dropped(self):
+        self.assertEqual(self.logged({"a": None, "b": {"c": None}}),
+                         {"a": None, "b": {"c": None}})
+
+    def test_key_label_and_changes_slots_are_encoded(self):
+        with dbfixlog.run(self.path, mode="dry", console=False,
+                          max_text=3) as log:
+            log.info("c", extra={dbfixlog.ATTR: {
+                "type": "change",
+                "key": {"id": uuid.UUID(int=1)},
+                "label": {"name": "ACME Corp"},
+                "changes": {"price": {"old": decimal.Decimal("1.10"),
+                                      "new": float("inf")},
+                            "note": {"old": None, "new": "x"}},
+            }})
+        [c] = [r for r in read_records(self.path) if r["type"] == "change"]
+        self.assertEqual(c["key"], {"id": str(uuid.UUID(int=1))})
+        self.assertEqual(c["label"],
+                         {"name": {"$truncated": "ACM", "length": 9}})
+        self.assertEqual(c["changes"],
+                         {"price": {"old": "1.10", "new": "Infinity"},
+                          "note": {"old": None, "new": "x"}})
+
+    def test_nan_outside_value_slots_does_not_lose_the_record(self):
+        with dbfixlog.run(self.path, mode="dry", console=False,
+                          target={"ratio": float("nan"), "db": "x" * 2000}):
+            pass
+        head = read_records(self.path)[0]
+        self.assertEqual(head["target"], {"ratio": "NaN", "db": "x" * 2000})
+
 
 if __name__ == "__main__":
     unittest.main()

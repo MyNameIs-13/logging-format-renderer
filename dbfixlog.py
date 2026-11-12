@@ -51,7 +51,35 @@ def _encode(value, run=None, truncate=True):
     ``json.dumps(..., allow_nan=False)`` accepts. ``run`` carries the
     Run's ``encoders``, ``strict`` and ``max_text`` settings. With
     ``truncate=False`` long text is kept whole (non-value slots).
+
+    A custom encoder (``encoders={Type: fn}``, matched along the value's
+    MRO) wins over the built-in rules. Its result is encoded again, by
+    the built-in rules alone if it has the same type as the input.
     """
+    fn = _custom_encoder(value, run)
+    if fn is not None:
+        try:
+            result = fn(value)
+        except Exception as e:
+            return _unencodable(value, e, run)
+        if type(result) is type(value):
+            return _builtin_encode(result, run, truncate)
+        return _encode(result, run, truncate)
+    return _builtin_encode(value, run, truncate)
+
+
+def _custom_encoder(value, run):
+    encoders = getattr(run, "encoders", None)
+    if not encoders:
+        return None
+    for cls in type(value).__mro__:
+        fn = encoders.get(cls)
+        if fn is not None:
+            return fn
+    return None
+
+
+def _builtin_encode(value, run, truncate):
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, enum.Enum):
@@ -92,13 +120,18 @@ def _str_or_unencodable(value, run):
     try:
         return str(value)
     except Exception as e:
-        if run is not None and run.strict:
-            raise
-        try:
-            text = repr(value)
-        except Exception:
-            text = "%s: %s" % (type(e).__name__, e)
-        return {"$unencodable": text}
+        return _unencodable(value, e, run)
+
+
+def _unencodable(value, error, run):
+    """``{"$unencodable": ...}`` for ``error``; re-raises it under strict."""
+    if run is not None and run.strict:
+        raise error
+    try:
+        text = repr(value)
+    except Exception:
+        text = "%s: %s" % (type(error).__name__, error)
+    return {"$unencodable": text}
 
 
 def _encode_record(rec, run=None):
