@@ -14,6 +14,8 @@ import os
 import sys
 
 __version__ = "0.1.0"
+# Shape version of the payload embedded in the Report (documented at the top of report.js).
+PAYLOAD_VERSION = 1
 
 PROG = "dbfixlog_render"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +30,15 @@ def _load_records(raw):
         records.append(json.loads(line.decode("utf-8")))
         lines.append(number)
     return records, lines
+
+
+def _title(flag, header, log_path):
+    """--title, then run_start.title, then the Log File's name."""
+    if flag is not None:
+        return flag
+    if isinstance(header.get("title"), str) and header["title"]:
+        return header["title"]
+    return os.path.basename(log_path)
 
 
 def _gzip_b64(data):
@@ -64,17 +75,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog=PROG)
     parser.add_argument("log")
     parser.add_argument("-o", dest="output", metavar="PATH|-")
+    parser.add_argument("--title", metavar="TEXT")
     args = parser.parse_args(argv)
     with open(args.log, "rb") as f:
         raw = f.read()
     records, lines = _load_records(raw)
+    title = _title(args.title, records[0], args.log)
     payload = {
+        "payload": PAYLOAD_VERSION,
+        "renderer": __version__,
+        "source": os.path.basename(args.log),
+        "title": title,
+        "unfinished": False,
+        "notices": [],
         "records": records,
         "lines": lines,
-        "notices": [],
-        "unfinished": False,
     }
-    report = build_html(payload, records[0].get("title", "")).encode("utf-8")
+    report = build_html(payload, title).encode("utf-8")
     if args.output == "-":
         sys.stdout.buffer.write(report)
         sys.stdout.buffer.flush()

@@ -88,6 +88,41 @@ class DefaultRender(RenderCase):
         self.assertIn("{:,} bytes".format(size), err)
 
 
+class Title(RenderCase):
+    def rendered(self, lines, *args):
+        log = self.log_from(lines, name="cleanup-2026.jsonl")
+        code, out, err = self.render(log, "-o", "-", *args)
+        self.assertEqual(code, 0, err)
+        return out, decode_payload(out)
+
+    def test_title_flag_wins_over_run_header_title(self):
+        out, payload = self.rendered(fixture_lines(), "--title", "Nightly <fix> & check")
+        self.assertEqual(payload["title"], "Nightly <fix> & check")
+        self.assertIn("<title>Nightly &lt;fix&gt; &amp; check</title>", out)
+
+    def test_run_header_title_is_used_without_flag(self):
+        _, payload = self.rendered(fixture_lines())
+        self.assertEqual(payload["title"], "Orphaned orders cleanup")
+
+    def test_log_file_name_is_the_fallback(self):
+        lines = fixture_lines()
+        header = json.loads(lines[0])
+        del header["title"]
+        lines[0] = json.dumps(header)
+        _, payload = self.rendered(lines)
+        self.assertEqual(payload["title"], "cleanup-2026.jsonl")
+
+
+class PayloadMeta(RenderCase):
+    def test_payload_names_renderer_version_and_source_file(self):
+        log = self.log_from(fixture_lines())
+        code, out, err = self.render(log, "-o", "-")
+        payload = decode_payload(out)
+        self.assertEqual(payload["payload"], 1)
+        self.assertRegex(payload["renderer"], r"^\d+\.\d+\.\d+$")
+        self.assertEqual(payload["source"], "run.jsonl")
+
+
 class OutputPath(RenderCase):
     def test_dash_o_path_writes_there_and_not_next_to_log(self):
         log = self.log_from(fixture_lines())
