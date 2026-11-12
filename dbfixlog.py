@@ -5,9 +5,11 @@ Python 3.6.3+, stdlib only. See .scratch/db-fix-logging/SPEC.md.
 
 import datetime
 import enum
+import functools
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import traceback
@@ -168,7 +170,7 @@ def _exc_dict(exc_info):
 
 
 def _build_record(created, levelname, logger, rtype, src=None, msg=None,
-                  exc_info=None, extra=None):
+                  exc_info=None, extra=None, scope=None):
     """The one place that builds a record dict, in field order.
 
     ``extra`` holds the type-specific fields (already JSON-safe or not:
@@ -182,6 +184,8 @@ def _build_record(created, levelname, logger, rtype, src=None, msg=None,
     }
     if src is not None:
         rec["src"] = src
+    if scope:
+        rec["scope"] = list(scope)
     if msg is not None:
         rec["msg"] = msg
     if extra:
@@ -196,6 +200,7 @@ def _record_from_logrecord(record):
     data = getattr(record, ATTR, None) or {}
     data = dict(data)
     rtype = data.pop("type", "message")
+    scope = data.pop("scope", None)
     if "msg" in data:
         msg = data.pop("msg")
     else:
@@ -204,7 +209,7 @@ def _record_from_logrecord(record):
     return _build_record(
         record.created, record.levelname, record.name, rtype,
         src="%s:%d" % (os.path.basename(record.pathname), record.lineno),
-        msg=msg, exc_info=exc_info, extra=data,
+        msg=msg, exc_info=exc_info, extra=data, scope=scope,
     )
 
 
@@ -274,6 +279,112 @@ class RunLogger(logging.LoggerAdapter):
 
 
 # --------------------------------------------------------------------------
+# Scopes (SPEC 3.4, 4.6).
+# --------------------------------------------------------------------------
+
+_scope_state = threading.local()  # .path: open Scope ids in this thread
+
+
+def _scope_path():
+    return getattr(_scope_state, "path", None) or []
+
+
+class ScopeFilter(logging.Filter):
+    """Stamps the current thread's Scope path into the ATTR dict."""
+
+    def filter(self, record):
+        path = _scope_path()
+        if path:
+            data = dict(getattr(record, ATTR, None) or {})
+            data.setdefault("scope", list(path))
+            setattr(record, ATTR, data)
+        return True
+
+
+def _caller(depth):
+    """``(src, logger name)`` of the frame ``depth`` levels above the caller."""
+    f = sys._getframe(depth + 1)
+    return ("%s:%d" % (os.path.basename(f.f_code.co_filename), f.f_lineno),
+            f.f_globals.get("__name__", "__main__"))
+
+
+class _Scope(object):
+    """One ``scope(...)`` use: a context manager, or a decorator that opens
+    a fresh Scope with the same static arguments on every call."""
+
+    def __init__(self, kind, key, label, msg, fields, src, logger):
+        self.kind = kind
+        self.key = key
+        self.label = label
+        self.msg = msg
+        self.fields = fields
+        self.src = src
+        self.logger = logger
+        self.run = None
+
+    def __call__(self, func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            src, _ = _caller(1)
+            with _Scope(self.kind, self.key, self.label, self.msg,
+                        self.fields, src, self.logger):
+                return func(*args, **kwargs)
+        return wrapper
+
+    def __enter__(self):
+        run = _active_run()
+        if run is None:
+            return self
+        self.run = run
+        self.id = run.next_scope_id()
+        self.parent = list(_scope_path())
+        self.start = time.time()
+        extra = {"id": self.id, "kind": self.kind}
+        for k in ("key", "label", "fields"):
+            v = getattr(self, k)
+            if v is not None:
+                extra[k] = v
+        self._write(self.start, "INFO", "scope_start", msg=self.msg,
+                    extra=extra)
+        _scope_state.path = self.parent + [self.id]
+        return self
+
+    def __exit__(self, etype, evalue, tb):
+        if self.run is None:
+            return False
+        _scope_state.path = self.parent
+        end = time.time()
+        extra = {"id": self.id, "outcome": "ok",
+                 "duration_ms": int(round((end - self.start) * 1000))}
+        exc_info = None
+        if etype is not None and not (issubclass(etype, SystemExit)
+                                      and evalue.code in (0, None)):
+            extra["outcome"] = "error"
+            exc_info = (etype, evalue, tb)
+        self._write(end, "ERROR" if exc_info else "INFO", "scope_end",
+                    exc_info=exc_info, extra=extra)
+        return False
+
+    def _write(self, created, level, rtype, **kw):
+        # Always written, whatever the configured level. Never raises
+        # unless the Run is strict.
+        try:
+            self.run.handler.write_dict(_build_record(
+                created, level, self.logger, rtype, src=self.src,
+                scope=self.parent, **kw))
+        except Exception:
+            if self.run.strict:
+                raise
+
+
+def scope(kind, *, key=None, label=None, msg=None, fields=None):
+    """Open a Scope: ``with dbfixlog.scope("customer", key={"id": 42}):``,
+    or decorate a function with ``@dbfixlog.scope("orphan-check")``."""
+    src, logger = _caller(1)
+    return _Scope(kind, key, label, msg, fields, src, logger)
+
+
+# --------------------------------------------------------------------------
 # run()
 # --------------------------------------------------------------------------
 
@@ -297,6 +408,13 @@ class _Run(object):
         self.handler = None
         self.stream = None
         self.log = None
+        self._scope_ids = 0
+        self._scope_lock = threading.Lock()
+
+    def next_scope_id(self):
+        with self._scope_lock:
+            self._scope_ids += 1
+            return self._scope_ids
 
     def __enter__(self):
         global _active
@@ -311,6 +429,7 @@ class _Run(object):
             _active = self
         try:
             self.handler = JsonlHandler(self.stream, self, self.level)
+            self.handler.addFilter(ScopeFilter())
             root = logging.getLogger()
             self._root_level = root.level
             root.addHandler(self.handler)
