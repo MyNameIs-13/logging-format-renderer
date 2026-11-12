@@ -201,6 +201,9 @@ def _record_from_logrecord(record):
     data = dict(data)
     rtype = data.pop("type", "message")
     scope = data.pop("scope", None)
+    src = data.pop("src", None)
+    if src is None:
+        src = "%s:%d" % (os.path.basename(record.pathname), record.lineno)
     if "msg" in data:
         msg = data.pop("msg")
     else:
@@ -208,8 +211,7 @@ def _record_from_logrecord(record):
     exc_info = record.exc_info if record.exc_info and record.exc_info[0] else None
     return _build_record(
         record.created, record.levelname, record.name, rtype,
-        src="%s:%d" % (os.path.basename(record.pathname), record.lineno),
-        msg=msg, exc_info=exc_info, extra=data, scope=scope,
+        src=src, msg=msg, exc_info=exc_info, extra=data, scope=scope,
     )
 
 
@@ -248,6 +250,31 @@ class JsonlHandler(logging.Handler):
 # Adapter returned by run().
 # --------------------------------------------------------------------------
 
+OPS = ("update", "insert", "delete")
+
+
+def _change_misuse(op, key, changes):
+    """What is wrong with a ``change(...)`` call (SPEC 4.3), or None."""
+    if op not in OPS:
+        return "unknown op %r (expected update, insert or delete)" % (op,)
+    if op == "update" and not changes:
+        return "update without changes"
+    if key is None and op != "insert":
+        return "%s without key" % op
+    if key is not None and not isinstance(key, dict):
+        return ("key must be a {column: value} object, got %s %r"
+                % (type(key).__name__, key))
+    return None
+
+
+def _old_new(entry):
+    """One ``changes`` entry: an ``(old, new)`` pair becomes
+    ``{"old": ..., "new": ...}``; anything else is written as given."""
+    if isinstance(entry, (tuple, list)) and len(entry) == 2:
+        return {"old": entry[0], "new": entry[1]}
+    return entry
+
+
 class RunLogger(logging.LoggerAdapter):
     """Stdlib adapter: the usual methods plus ``fields=``.
 
@@ -267,6 +294,59 @@ class RunLogger(logging.LoggerAdapter):
             kwargs["extra"] = extra
         return msg, kwargs
 
+    def change(self, table, op, *, key=None, label=None, changes=None,
+               msg=None, status=None, error=None, level=None, fields=None):
+        """Log one row operation as a Change (SPEC 3.3, 4.3)."""
+        run = _active_run()
+        src = _caller(1)[0]
+        problem = _change_misuse(op, key, changes)
+        if problem is not None and run is not None and run.strict:
+            raise ValueError("invalid change call: " + problem)
+        if status is None:
+            if error is not None:
+                status = "failed"
+            elif run is not None:
+                status = "planned" if run.mode == "dry" else "applied"
+        if error is not None:
+            # The exception itself becomes ``str()`` at write time, through
+            # _encode, so a raising __str__ never escapes the call.
+            error = {"type": type(error).__name__, "message": error}
+        data = {"type": "change", "msg": msg, "table": table, "op": op}
+        if isinstance(changes, dict):
+            changes = {f: _old_new(v) for f, v in changes.items()}
+        for k, v in (("key", key), ("label", label), ("changes", changes),
+                     ("status", status), ("error", error), ("fields", fields)):
+            if v is not None:
+                data[k] = v
+        if level is None:
+            level = logging.ERROR if status == "failed" else logging.INFO
+        self._typed(level, "%s %s" % (op, table), data, src)
+        if problem is not None:
+            self._typed(logging.WARNING, "invalid change call: " + problem,
+                        {}, src)
+
+    def finding(self, check, msg=None, *, table=None, key=None, label=None,
+                level=logging.WARNING, fields=None):
+        """Log a Finding: ``check`` is the stable rule name (SPEC 3.3, 4.3)."""
+        data = {"type": "finding", "msg": msg, "check": check}
+        for k, v in (("table", table), ("key", key), ("label", label),
+                     ("fields", fields)):
+            if v is not None:
+                data[k] = v
+        text = check if msg is None else "%s: %s" % (check, msg)
+        self._typed(level, text, data, _caller(1)[0])
+
+    def scope(self, kind, *, key=None, label=None, msg=None, fields=None):
+        """Open a Scope stamped with this logger's name (SPEC 3.4, 4.3)."""
+        return _Scope(kind, key, label, msg, fields, _caller(1)[0],
+                      self.logger.name)
+
+    def _typed(self, level, text, data, src):
+        # Typed methods live in this file, so findCaller would stamp
+        # dbfixlog.py: the caller's src is passed through ATTR instead.
+        data["src"] = src
+        self.logger.log(level, "%s", text, extra={ATTR: data})
+
     @property
     def dry_run(self):
         run = _active_run()
@@ -276,6 +356,15 @@ class RunLogger(logging.LoggerAdapter):
     def write_run(self):
         run = _active_run()
         return run is not None and run.mode == "write"
+
+
+def get_logger(name):
+    """The adapter for helper modules: ``log = dbfixlog.get_logger(__name__)``.
+
+    It finds the active Run at call time, so it may be created at import
+    time, before any Run is open.
+    """
+    return RunLogger(logging.getLogger(name))
 
 
 # --------------------------------------------------------------------------
