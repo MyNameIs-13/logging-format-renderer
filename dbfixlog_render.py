@@ -63,6 +63,7 @@ def build_html(payload, title):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog=PROG)
     parser.add_argument("log")
+    parser.add_argument("-o", dest="output", metavar="PATH|-")
     args = parser.parse_args(argv)
     with open(args.log, "rb") as f:
         raw = f.read()
@@ -73,9 +74,17 @@ def main(argv=None):
         "notices": [],
         "unfinished": False,
     }
-    out_path = os.path.splitext(args.log)[0] + ".html"
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(build_html(payload, records[0].get("title", "")))
+    report = build_html(payload, records[0].get("title", "")).encode("utf-8")
+    if args.output == "-":
+        sys.stdout.buffer.write(report)
+        sys.stdout.buffer.flush()
+        where = "stdout"
+    else:
+        where = args.output or os.path.splitext(args.log)[0] + ".html"
+        with open(where, "wb") as f:
+            f.write(report)
+    sys.stderr.write("{}: wrote {} records to {} ({:,} bytes)\n".format(
+        PROG, len(records), where, len(report)))
     return 0
 
 

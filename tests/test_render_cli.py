@@ -70,6 +70,42 @@ class DefaultRender(RenderCase):
         self.assertEqual(payload["notices"], [])
         self.assertFalse(payload["unfinished"])
 
+    def test_existing_report_is_overwritten(self):
+        log = self.log_from(fixture_lines())
+        self.write_log("old report", "run.html")
+        code, _, err = self.render(log)
+        self.assertEqual(code, 0, err)
+        decode_payload(self.report(os.path.join(self.dir, "run.html")))
+
+    def test_success_prints_one_summary_line_with_count_and_size_to_stderr(self):
+        log = self.log_from(fixture_lines())
+        code, out, err = self.render(log)
+        self.assertEqual(out, "")
+        size = os.path.getsize(os.path.join(self.dir, "run.html"))
+        self.assertEqual(err.count("\n"), 1, err)
+        self.assertTrue(err.startswith("dbfixlog_render: "), err)
+        self.assertIn("10 records", err)
+        self.assertIn("{:,} bytes".format(size), err)
+
+
+class OutputPath(RenderCase):
+    def test_dash_o_path_writes_there_and_not_next_to_log(self):
+        log = self.log_from(fixture_lines())
+        target = os.path.join(self.dir, "elsewhere.html")
+        code, _, err = self.render(log, "-o", target)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(decode_payload(self.report(target))["records"]), 10)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "run.html")))
+
+    def test_dash_o_dash_writes_report_to_stdout_and_summary_to_stderr(self):
+        log = self.log_from(fixture_lines())
+        code, out, err = self.render(log, "-o", "-")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(decode_payload(out)["records"]), 10)
+        self.assertIn("10 records", err)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "run.html")))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "-")))
+
 
 if __name__ == "__main__":
     unittest.main()
