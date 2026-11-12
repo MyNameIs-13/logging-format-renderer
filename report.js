@@ -42,7 +42,8 @@
 //       The last line had no trailing newline and was skipped.
 //
 // The page also exposes its state for tests on <html>: data-state = "loading" | "ready" |
-// "error", data-record-count, and data-error (on error).
+// "error", data-record-count, and data-error (on error). Once ready, window.dbfixlogReport
+// is {model, list, onQuery} (see renderReport): the seam later tickets hook into.
 // ---------------------------------------------------------------------------------------
 
 async function decodePayload(base64Text) {
