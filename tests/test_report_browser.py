@@ -1,4 +1,7 @@
-"""Headless Firefox check: a rendered Report decodes its embedded payload from file://.
+"""Headless Firefox checks on rendered Reports opened from file://.
+
+Covers decoding (ticket 06) and the Report core (ticket 07): Run Header, mode strip,
+notices, the list's columns and value display.
 
 Skipped when firefox or node is not on PATH, or when DBFIXLOG_SKIP_BROWSER is set.
 """
@@ -19,10 +22,23 @@ SCRIPT = os.path.join(ROOT, "dbfixlog_render.py")
 FIXTURE = os.path.join(ROOT, "tests", "fixtures", "basic.jsonl")
 DRIVER = os.path.join(ROOT, "tests", "browser", "bidi_eval.mjs")
 
-# What the page exposes once report.js has run: its state, the record count, the visible text.
-PROBE = ("(() => { const d = document.documentElement.dataset;"
-         " return d.state ? JSON.stringify({state: d.state, count: d.recordCount,"
-         " error: d.error || null, text: document.getElementById('app').textContent}) : ''; })()")
+# What the page exposes once report.js has run: its state, the record count, the visible
+# text, the mode strip, the notices and the rendered list rows (cells joined by " | ").
+PROBE = """(() => {
+  const d = document.documentElement.dataset;
+  if (!d.state || d.state === "loading") return "";
+  const q = (s) => Array.from(document.querySelectorAll(s));
+  const strip = document.querySelector(".strip");
+  return JSON.stringify({
+    state: d.state, count: d.recordCount, error: d.error || null,
+    text: document.getElementById("app").textContent,
+    strip: strip ? {tone: strip.dataset.tone, text: strip.textContent} : null,
+    notices: q(".notice").map((n) => ({kind: n.dataset.kind, tone: n.dataset.tone, text: n.textContent})),
+    header: q(".lhead .hc").map((c) => c.textContent),
+    rows: q(".vr").map((r) => Array.from(r.children).map((c) => c.textContent).join(" | ")),
+    marks: {null: q(".vr .null").length, empty: q(".vr .empty").length, mark: q(".vr .mark").map((m) => m.textContent)},
+  });
+})()"""
 
 FIREFOX = shutil.which("firefox")
 NODE = shutil.which("node")
@@ -69,14 +85,107 @@ class StubReportInFirefox(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
         return json.loads(proc.stdout.decode("utf-8"))
 
-    def test_stub_decodes_embedded_payload_from_file_url(self):
+    def render(self, name, records):
+        log = os.path.join(self.dir, name + ".jsonl")
+        with open(log, "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        report = os.path.join(self.dir, name + ".html")
+        subprocess.run([sys.executable, SCRIPT, log, "-o", report], check=True,
+                       stderr=subprocess.DEVNULL)
+        page = self.open_report(report)
+        self.assertEqual(page["state"], "ready", page)
+        return page
+
+    def test_basic_fixture_renders_header_and_tree(self):
         report = os.path.join(self.dir, "basic.html")
         subprocess.run([sys.executable, SCRIPT, FIXTURE, "-o", report], check=True,
                        stderr=subprocess.DEVNULL)
         page = self.open_report(report)
         self.assertEqual(page["state"], "ready", page)
         self.assertEqual(page["count"], "10")
-        self.assertIn("10 records", page["text"])
+        self.assertIn("Orphaned orders cleanup", page["text"])
+        self.assertIn("TICKET-123", page["text"])
+        self.assertIn("shop_prod", page["text"])
+        self.assertEqual(page["header"],
+                         ["Time", "Scope", "Status", "Op", "Table", "Key", "Label", "Details"])
+        # Scope headers and entries, in file order: phase, customer, finding, 2 changes, message.
+        self.assertEqual(len(page["rows"]), 6, page["rows"])
+        self.assertTrue(page["rows"][0].startswith("20:01:00.120 | "), page["rows"][0])
+        self.assertIn("orphan-check", page["rows"][1])
+        self.assertIn("| phase |", page["rows"][1])
+        self.assertIn("customer", page["rows"][2])
+        self.assertIn("id=42 | ACME |", page["rows"][2])
+        self.assertIn("planned | delete | orders | id=156 | A88f", page["rows"][4])
+        self.assertIn("cleaned <b>&amp;</b> </script> ünïcode", page["rows"][5])
+
+    def test_dry_run_with_applied_changes_shows_red_strip(self):
+        page = self.render("dry_applied", [
+            START("dry"), change("applied"), change("failed", error={"type": "E", "message": "x"}), END])
+        self.assertEqual(page["strip"]["tone"], "red", page["strip"])
+        self.assertIn("Dry Run, but 2 Changes were logged as applied or failed", page["strip"]["text"])
+        self.assertIn("Show them", page["strip"]["text"])
+        self.assertIn("applied ⚠", page["rows"][0])
+
+    def test_clean_dry_run_shows_amber_strip(self):
+        page = self.render("dry_clean", [START("dry"), change("planned"), END])
+        self.assertEqual(page["strip"]["tone"], "amber")
+        self.assertEqual(page["strip"]["text"], "Dry Run: the Changes below are planned, not applied.")
+        self.assertEqual(page["notices"], [])
+
+    def test_write_run_with_planned_changes_shows_amber_notice(self):
+        page = self.render("write_planned", [START("write"), change("planned"), change("applied"), END])
+        self.assertIsNone(page["strip"])
+        self.assertEqual([(n["kind"], n["tone"]) for n in page["notices"]], [("write_planned", "amber")])
+        self.assertIn("logged as planned in a Write Run: they were not carried out",
+                      page["notices"][0]["text"])
+
+    def test_unfinished_run_and_scope_notices(self):
+        page = self.render("crashed", [
+            START("write"),
+            msg("scope_start", id=1, kind="customer", key={"id": 1}),
+            change("applied", scope=[1])])
+        self.assertEqual([n["kind"] for n in page["notices"]], ["run_unfinished", "unfinished_scopes"])
+        self.assertIn("unfinished", page["text"])
+
+    def test_values_display_null_empty_and_markers(self):
+        page = self.render("values", [
+            START("write"),
+            change("applied", changes={
+                "a": {"old": None, "new": ""},
+                "b": {"old": {"$truncated": "long text", "length": 5000}, "new": "20261122053550"},
+                "c": {"old": {"$bytes": "00ff", "length": 2}, "new": {"$unencodable": "<Thing>"}}}),
+            END])
+        self.assertEqual(page["marks"]["null"], 1)
+        self.assertEqual(page["marks"]["empty"], 1)
+        self.assertEqual(page["marks"]["mark"], ["truncated · 5000 chars", "bytes · 2", "unencodable"])
+        self.assertIn("a: NULL → (empty)", page["rows"][0])
+        self.assertIn("→ 20261122053550", page["rows"][0])
+        self.assertIn("<Thing>", page["rows"][0])
+
+
+TS = "2026-11-12T20:01:00.000Z"
+
+
+def START(mode):
+    return {"ts": TS, "level": "INFO", "logger": "dbfixlog", "type": "run_start",
+            "format": "1.0", "mode": mode, "title": "T"}
+
+
+END = {"ts": "2026-11-12T20:02:00.000Z", "level": "INFO", "logger": "dbfixlog",
+       "type": "run_end", "outcome": "ok", "duration_ms": 60000}
+
+
+def msg(type_, **extra):
+    r = {"ts": TS, "level": "INFO", "logger": "fix", "type": type_, "src": "fix.py:1"}
+    r.update(extra)
+    return r
+
+
+def change(status, **extra):
+    r = msg("change", op="update", table="orders", key={"id": 7}, status=status)
+    r.update(extra)
+    return r
 
 
 if __name__ == "__main__":
