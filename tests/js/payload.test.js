@@ -27,3 +27,14 @@ test("decodePayload reads the payload the renderer embeds", async () => {
   assert.strictEqual(payload.unfinished, false);
   assert.deepStrictEqual(payload.notices, []);
 });
+
+test("decodePayload reads a payload that inflates in many chunks", async () => {
+  // The decoder copies stream chunks into one buffer sized from the gzip trailer (ticket 11);
+  // multibyte characters straddle the chunk boundaries here.
+  const zlib = require("node:zlib");
+  const records = Array.from({ length: 20000 }, (_, i) => ({ i, msg: "ünï " + i }));
+  const gz = zlib.gzipSync(Buffer.from(JSON.stringify({ payload: 1, records })));
+  const payload = await decodePayload(gz.toString("base64"));
+  assert.strictEqual(payload.records.length, 20000);
+  assert.strictEqual(payload.records[19999].msg, "ünï 19999");
+});

@@ -17,6 +17,9 @@ import tempfile
 import unittest
 
 import budget_fixture
+import test_report_browser as base
+
+_FF = base.StubReportInFirefox.__dict__  # not the class: unittest would collect it
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "dbfixlog_render.py")
@@ -86,3 +89,76 @@ class BudgetFixture(unittest.TestCase):
         budget_fixture.generate(other, 20000, seed=1)
         strip = lambda rs: [(r["type"], r.get("key"), r.get("msg")) for r in rs]
         self.assertEqual(strip(read_jsonl(other)), strip(self.records))
+
+
+# Waits for the Report and its idle-time search index (ticket 08), then times a set of
+# filters and searches through the real filter bar: filter.set() runs filterRows and
+# redraws the list synchronously; reading offsetHeight adds the forced layout.
+BUDGET_PROBE = """(() => {
+  const R = window.dbfixlogReport, d = document.documentElement.dataset;
+  if (d.state === "error") return JSON.stringify({error: d.error});
+  if (d.state !== "ready" || !R || !R.model.search) return "";
+  const t = R.timing;
+  const queries = [
+    {q: "deadlock"}, {q: "table:orders op:update"}, {q: "status:failed"},
+    {q: "check:no-lines level:warning"}, {q: "kind:customer is:unfinished"},
+    {q: "f.city=utrecht"}, {q: "INV-2024"}, {q: "lock timeout"}, {q: "zzzz-no-match"},
+    {view: "changes", q: ""}, {view: "findings"}, {view: "errors"},
+    {view: "all", level: "WARNING"}, {level: "DEBUG", q: "type:scope"}, {q: ""},
+  ];
+  const search = [];
+  for (const s of queries) {
+    const t0 = performance.now();
+    R.filter.set(s);
+    void document.body.offsetHeight;
+    search.push({s: s, ms: performance.now() - t0, filterMs: R.filter.last.ms,
+                 rows: R.list.rows.length});
+  }
+  return JSON.stringify({count: Number(d.recordCount), timing: t, indexMs: R.filter.indexMs,
+                        search: search});
+})()"""
+
+BUDGET_N = 100000
+DATA_READY_MS = 500
+SEARCH_MS = 50
+
+
+@unittest.skipIf(os.environ.get("DBFIXLOG_SKIP_BROWSER") or os.environ.get("DBFIXLOG_SKIP_BUDGET"),
+                 "DBFIXLOG_SKIP_BROWSER or DBFIXLOG_SKIP_BUDGET set")
+@unittest.skipUnless(base.FIREFOX and base.NODE, "needs firefox and node on PATH")
+class BudgetInFirefox(unittest.TestCase):
+    setUpClass = _FF["setUpClass"]
+    tearDownClass = _FF["tearDownClass"]
+    _wait_for_bidi = _FF["_wait_for_bidi"]
+    open_report = _FF["open_report"]
+
+    def test_100k_records_meet_the_data_ready_and_search_budgets(self):
+        log = os.path.join(self.dir, "budget.jsonl")
+        budget_fixture.generate(log, BUDGET_N, seed=7)
+        report = os.path.join(self.dir, "budget.html")
+        subprocess.run([sys.executable, SCRIPT, log, "-o", report], check=True,
+                       stderr=subprocess.DEVNULL)
+        with open(log, "rb") as f:
+            raw = f.read()
+        ratio = len(raw) / len(gzip.compress(raw, 9))
+        runs = [self.open_report(report, BUDGET_PROBE) for _ in range(3)]
+        for page in runs:
+            self.assertNotIn("error", page)
+            self.assertEqual(page["count"], len(raw.splitlines()))
+        ready = [p["timing"]["ready"] for p in runs]
+        worst = [max(s["ms"] for s in p["search"]) for p in runs]
+        # Budgets: the median of three loads, so one hiccup on a busy machine doesn't fail it.
+        med = lambda xs: sorted(xs)[len(xs) // 2]
+        t = runs[ready.index(med(ready))]["timing"]
+        sys.stderr.write(
+            "\n[budget] %d records, Log File %.1f MB, Report %.1f MB, gzip ratio %.2fx\n"
+            "[budget] data ready %s ms (median of %s; decode+parse %d, model+render %d,"
+            " since navigation %d), search index %d ms (idle)\n"
+            "[budget] filter/search worst %s ms (median of %s; filterRows alone <= %.1f)\n"
+            % (page["count"], len(raw) / 1e6, os.path.getsize(report) / 1e6, ratio,
+               round(med(ready)), [round(x) for x in ready], t["decode"], t["render"], t["nav"],
+               runs[ready.index(med(ready))]["indexMs"], round(med(worst), 1), [round(x, 1) for x in worst],
+               max(s["filterMs"] for p in runs for s in p["search"])))
+        self.assertLessEqual(ratio, 5.0)
+        self.assertLessEqual(med(ready), DATA_READY_MS)
+        self.assertLessEqual(med(worst), SEARCH_MS)

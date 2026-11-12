@@ -43,15 +43,42 @@
 //
 // The page also exposes its state for tests on <html>: data-state = "loading" | "ready" |
 // "error", data-record-count, and data-error (on error). Once ready, window.dbfixlogReport
-// is {model, list, filter, onQuery} (see renderReport): the seam later tickets hook into.
+// is {model, list, filter, onQuery, timing} (see renderReport and startReport): the seam later
+// tickets hook into. timing = {decode, render, ready, nav} in ms; <html data-ready-ms> too.
 // ---------------------------------------------------------------------------------------
 
 async function decodePayload(base64Text) {
-  const bin = atob(base64Text.trim());
+  const bytes = base64Bytes(base64Text.trim());
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  // Copy the inflated chunks into one buffer sized from the gzip trailer (ISIZE, the
+  // uncompressed size mod 2^32), then decode once. At 100k records this is ~2x faster in
+  // Firefox than Response.text() or .arrayBuffer() (ticket 11). The buffer still grows if
+  // the hint is short.
+  const n = bytes.length < 18 ? 0 : (bytes[bytes.length - 4] | bytes[bytes.length - 3] << 8 |
+    bytes[bytes.length - 2] << 16 | bytes[bytes.length - 1] << 24) >>> 0;
+  let buf = new Uint8Array(n);
+  let used = 0;
+  const reader = stream.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (used + value.length > buf.length) {
+      const bigger = new Uint8Array(Math.max(buf.length * 2, used + value.length));
+      bigger.set(buf.subarray(0, used));
+      buf = bigger;
+    }
+    buf.set(value, used);
+    used += value.length;
+  }
+  return JSON.parse(new TextDecoder().decode(buf.subarray(0, used)));
+}
+
+function base64Bytes(text) {
+  if (typeof Uint8Array.fromBase64 === "function") return Uint8Array.fromBase64(text);
+  const bin = atob(text);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
-  return JSON.parse(await new Response(stream).text());
+  return bytes;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1396,6 +1423,7 @@ function createFilterBar(doc, bar, list, m, listEl) {
   let timer = 0;
   const filter = {
     last: null,
+    indexMs: null,
     get() { return Object.assign({}, state); },
     set(partial) {
       clearTimeout(timer);
@@ -1440,8 +1468,13 @@ function createFilterBar(doc, bar, list, m, listEl) {
     else if (e.key === "Escape") filter.set({ q: "" });
   });
   // Build the search index while idle, so the first keystroke doesn't pay for it.
+  // filter.indexMs records how long that took (for the budget test, ticket 11).
   const idle = doc.defaultView.requestIdleCallback || ((f) => setTimeout(f, 50));
-  idle(() => searchIndex(m));
+  idle(() => {
+    const t0 = performance.now();
+    searchIndex(m);
+    filter.indexMs = performance.now() - t0;
+  });
   return filter;
 }
 
@@ -1474,10 +1507,18 @@ async function startReport(doc) {
   const root = doc.documentElement;
   const app = doc.getElementById("app");
   root.dataset.state = "loading";
+  const t0 = performance.now();
   try {
     const payload = await decodePayload(doc.getElementById("dbfixlog-payload").textContent);
+    const t1 = performance.now();
     root.dataset.recordCount = String(payload.records.length);
-    doc.defaultView.dbfixlogReport = renderReport(doc, app, payload);
+    const report = renderReport(doc, app, payload);
+    const t2 = performance.now();
+    // Data ready (SPEC §7): decode + parse + model + first list render, in ms from the
+    // start of this function; nav is the same moment measured from navigation start.
+    report.timing = { decode: t1 - t0, render: t2 - t1, ready: t2 - t0, nav: t2 };
+    root.dataset.readyMs = String(Math.round(t2 - t0));
+    doc.defaultView.dbfixlogReport = report;
     root.dataset.state = "ready";
   } catch (e) {
     root.dataset.error = String(e);
