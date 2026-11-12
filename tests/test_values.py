@@ -213,6 +213,19 @@ class ValueTest(unittest.TestCase):
                          {"price": {"old": "1.10", "new": "Infinity"},
                           "note": {"old": None, "new": "x"}})
 
+    def test_scope_start_key_label_fields_are_encoded(self):
+        with dbfixlog.run(self.path, mode="dry", console=False, max_text=3):
+            with dbfixlog.scope("customer", key={"id": decimal.Decimal("4.20")},
+                                label={"name": "ACME"},
+                                fields={"seen": {2, 1}}):
+                pass
+        [s] = [r for r in read_records(self.path)
+               if r["type"] == "scope_start"]
+        self.assertEqual(s["key"], {"id": "4.20"})
+        self.assertEqual(s["label"], {"name": {"$truncated": "ACM",
+                                               "length": 4}})
+        self.assertEqual(s["fields"], {"seen": [1, 2]})
+
     def test_nan_outside_value_slots_does_not_lose_the_record(self):
         with dbfixlog.run(self.path, mode="dry", console=False,
                           target={"ratio": float("nan"), "db": "x" * 2000}):
