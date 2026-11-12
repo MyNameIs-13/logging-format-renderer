@@ -4,6 +4,7 @@ Python 3.6.3+, stdlib only. See .scratch/db-fix-logging/SPEC.md.
 """
 
 import datetime
+import enum
 import json
 import logging
 import os
@@ -53,6 +54,8 @@ def _encode(value, run=None, truncate=True):
     """
     if value is None or isinstance(value, bool):
         return value
+    if isinstance(value, enum.Enum):
+        return _encode(value.value, run, truncate)
     if isinstance(value, str):
         limit = (getattr(run, "max_text", DEFAULT_MAX_TEXT) if run is not None
                  else DEFAULT_MAX_TEXT)
@@ -82,7 +85,20 @@ def _encode(value, run=None, truncate=True):
         except TypeError:
             items = list(value)
         return [_encode(v, run, truncate) for v in items]
-    return str(value)
+    return _str_or_unencodable(value, run)
+
+
+def _str_or_unencodable(value, run):
+    try:
+        return str(value)
+    except Exception as e:
+        if run is not None and run.strict:
+            raise
+        try:
+            text = repr(value)
+        except Exception:
+            text = "%s: %s" % (type(e).__name__, e)
+        return {"$unencodable": text}
 
 
 def _encode_record(rec, run=None):
@@ -185,6 +201,8 @@ class JsonlHandler(logging.Handler):
         try:
             self.write_dict(_record_from_logrecord(record))
         except Exception:
+            if self.run is not None and self.run.strict:
+                raise
             self.handleError(record)
 
 

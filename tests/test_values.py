@@ -2,6 +2,8 @@
 
 import datetime
 import decimal
+import enum
+import ipaddress
 import json
 import logging
 import os
@@ -9,6 +11,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
 
@@ -107,6 +110,54 @@ class ValueTest(unittest.TestCase):
         self.assertEqual(len(v["$bytes"]), 128)
         self.assertEqual(self.logged(bytearray(b"\x01"), overwrite=True),
                          {"$bytes": "01", "length": 1})
+
+    def test_uuid_ip_and_other_types_use_str(self):
+        u = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        self.assertEqual(self.logged(u), "12345678-1234-5678-1234-567812345678")
+        self.assertEqual(self.logged(ipaddress.ip_address("10.0.0.1"),
+                                     overwrite=True), "10.0.0.1")
+
+        class Thing(object):
+            def __str__(self):
+                return "thing!"
+        self.assertEqual(self.logged(Thing(), overwrite=True), "thing!")
+
+    def test_enum_is_written_as_its_value(self):
+        class Color(enum.Enum):
+            RED = "red"
+            BLUE = 2
+        self.assertEqual(self.logged(Color.RED), "red")
+        self.assertEqual(self.logged(Color.BLUE, overwrite=True), 2)
+
+    def test_failing_str_gives_unencodable(self):
+        class Bad(object):
+            def __str__(self):
+                raise ValueError("boom")
+
+            def __repr__(self):
+                return "<Bad>"
+        self.assertEqual(self.logged(Bad()), {"$unencodable": "<Bad>"})
+
+    def test_failing_str_and_repr_gives_error_text(self):
+        class Worse(object):
+            def __str__(self):
+                raise ValueError("boom")
+
+            def __repr__(self):
+                raise ValueError("boom")
+        v = self.logged({"w": Worse(), "ok": 1})
+        self.assertEqual(v["ok"], 1)
+        self.assertIn("ValueError: boom", v["w"]["$unencodable"])
+
+    def test_strict_raises_instead_of_unencodable(self):
+        class Bad(object):
+            def __str__(self):
+                raise ValueError("boom")
+        with dbfixlog.run(self.path, mode="dry", console=False,
+                          strict=True) as log:
+            with self.assertRaises(ValueError):
+                log.info("v", fields={"v": Bad()})
+        self.assertEqual(self.messages(), [])
 
 
 if __name__ == "__main__":
