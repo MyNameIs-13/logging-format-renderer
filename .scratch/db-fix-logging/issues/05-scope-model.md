@@ -22,7 +22,7 @@ Scopes appear in the Log File as `scope_start`/`scope_end` records, and every re
 - **Records outside any Scope** are valid and shown at Run level.
 - **Same entity twice:** each `scope(...)` call is a separate Scope. The Report does not merge them. A key filter finds both.
 - **End record:** `id`, `duration_ms`, `outcome` `ok`/`error`. `error` means an exception escaped the Scope. The record then carries `exc` (record-schema shape), and the helper re-raises the exception. Richer outcomes (changed, had failed Changes, had Findings) are not recorded; the renderer derives them from the Scope's contents. A failed Change that the script caught leaves the Scope `ok`.
-- **Levels:** start/end records are always written regardless of the configured logging level. They are stamped INFO, or ERROR for an `error` end. The Report's level filter never hides Scope headers, only their contents.
+- **Levels:** start/end records are always written regardless of the configured logging level. They are stamped INFO, or ERROR for an `error` end. The Report's level filter never hides Scope headers, only their contents. *(Superseded by Scope headers under filters (09-scope-headers-under-filters.md): every filter, including the level filter, hides Scopes that contain no match.)*
 - **Crash:** a Scope with no end record is shown as *unfinished*. It closes at the last record in the file and has no duration. Telling a crashed Run from a completed one is left to 06-run-header.md.
 - No new glossary term: start/end records are structural markers. The Scope definition in GLOSSARY.md was widened to cover phases and repeated entities.
 

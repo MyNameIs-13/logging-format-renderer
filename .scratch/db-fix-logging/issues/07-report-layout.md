@@ -90,4 +90,4 @@ The synthetic values compress ~9.5x. Real data at 4–6x would give 5–7 MB, so
 - D: columns, but Scope headers spanning the row and a wasteful Level column.
 - Also rejected: a logger filter, a time-range filter, record-type symbols, a separate Level column, and a "nothing was written" claim in Dry Runs.
 
-**Open:** the *Errors* view hides Scopes without errors, while Scope model says the level filter never hides Scope headers. Whether every filter should prune empty Scopes is its own ticket: Scope headers under filters.
+**Open:** the *Errors* view hides Scopes without errors, while Scope model says the level filter never hides Scope headers. Whether every filter should prune empty Scopes is its own ticket: Scope headers under filters. *(Resolved there: every filter prunes Scopes the same way, and `is:unfinished` joins the query syntax.)*
