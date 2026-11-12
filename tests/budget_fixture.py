@@ -123,12 +123,16 @@ def generate(path, n, seed=0):
     """Write a Write Run of about ``n`` records (never fewer) to ``path``."""
     g = _Gen(n, seed)
     clock = _Clock(seed)
-    real = time.time, time.time_ns
-    time.time, time.time_ns = clock.time, clock.time_ns
+    # logging stamps records with time.time() on 3.6 and time.time_ns() on newer Pythons.
+    names = [name for name in ("time", "time_ns") if hasattr(time, name)]
+    real = [getattr(time, name) for name in names]
+    for name in names:
+        setattr(time, name, getattr(clock, name))
     try:
         _write(path, n, seed, g)
     finally:
-        time.time, time.time_ns = real
+        for name, fn in zip(names, real):
+            setattr(time, name, fn)
     return path
 
 

@@ -275,6 +275,7 @@ log.change("orders", "delete", key={"id": 156}, label={"no": "A88f"})
 
 - One Run per process, with a single writer.
 - Scope state lives in **`threading.local`**, because `contextvars` needs 3.7+. Each thread keeps its own Scope path. `asyncio` scripts are unsupported, and there is no further thread or process support.
+- No mutable module-level state in `dbfixlog.py` or `dbfixlog_render.py` (no `global`, no module-level locks, thread-locals or mutated containers): the active Run is found through its JSONL handler on the root logger, and the Scope thread-local and Scope-id counter live on the Run object.
 - Build on stdlib `logging` only (_source: [Prior-art survey for structured logs → HTML](issues/01-prior-art-survey.md)_):
   - Stamp the Scope path onto every record with a `logging.Filter` that reads the thread-local Scope state. This is the cookbook pattern, with `threading.local` in place of `ContextVar`.
   - Put typed fields under **one namespaced LogRecord attribute**, because `extra` keys that clash with LogRecord attributes raise `KeyError`. python-json-logger's reserved-attribute list is a useful reference.

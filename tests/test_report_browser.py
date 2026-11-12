@@ -253,7 +253,8 @@ def msg(type_, **extra):
 
 
 def change(status, **extra):
-    r = msg("change", op="update", table="orders", key={"id": 7}, status=status)
+    r = msg("change", op="update", table="orders", key={"id": 7}, status=status,
+            changes={"total": {"old": 1, "new": 2}})
     r.update(extra)
     return r
 

@@ -25,12 +25,17 @@ ATTR = "dbfixlog"
 
 MODES = ("dry", "write")
 
-_lock = threading.Lock()
-_active = None  # the active _Run, or None
+
+def _attached_runs():
+    """The Runs whose JSONL handlers are attached to the root logger."""
+    return [h.run for h in logging.getLogger().handlers
+            if isinstance(h, JsonlHandler)]
 
 
 def _active_run():
-    return _active
+    """The active Run, or None."""
+    runs = _attached_runs()
+    return runs[0] if runs else None
 
 
 # --------------------------------------------------------------------------
@@ -533,18 +538,20 @@ def get_logger(name):
 # Scopes (SPEC 3.4, 4.6).
 # --------------------------------------------------------------------------
 
-_scope_state = threading.local()  # .path: open Scope ids in this thread
-
-
-def _scope_path():
-    return getattr(_scope_state, "path", None) or []
+def _scope_path(run):
+    """The ids of the Scopes open in this thread, outermost first."""
+    return getattr(run.scope_state, "path", None) or []
 
 
 class ScopeFilter(logging.Filter):
     """Stamps the current thread's Scope path into the ATTR dict."""
 
+    def __init__(self, run):
+        logging.Filter.__init__(self)
+        self.run = run
+
     def filter(self, record):
-        path = _scope_path()
+        path = _scope_path(self.run)
         if path:
             data = dict(getattr(record, ATTR, None) or {})
             data.setdefault("scope", list(path))
@@ -588,7 +595,7 @@ class _Scope(object):
             return self
         self.run = run
         self.id = run.next_scope_id()
-        self.parent = list(_scope_path())
+        self.parent = list(_scope_path(run))
         self.start = time.time()
         extra = {"id": self.id, "kind": self.kind}
         for k in ("key", "label", "fields"):
@@ -600,13 +607,13 @@ class _Scope(object):
             str(self.kind))
         self._write(self.start, "INFO", "scope_start", msg=self.msg,
                     extra=extra)
-        _scope_state.path = self.parent + [self.id]
+        run.scope_state.path = self.parent + [self.id]
         return self
 
     def __exit__(self, etype, evalue, tb):
         if self.run is None:
             return False
-        _scope_state.path = self.parent
+        self.run.scope_state.path = self.parent
         end = time.time()
         extra = {"id": self.id, "outcome": "ok",
                  "duration_ms": int(round((end - self.start) * 1000))}
@@ -683,6 +690,7 @@ class _Run(object):
         self.scope_labels = {}  # Scope id -> console label
         self.stream = None
         self.log = None
+        self.scope_state = threading.local()  # .path: this thread's Scopes
         self._scope_ids = 0
         self._scope_lock = threading.Lock()
 
@@ -692,28 +700,25 @@ class _Run(object):
             return self._scope_ids
 
     def __enter__(self):
-        global _active
-        with _lock:
-            if _active is not None:
-                raise RuntimeError("dbfixlog.run() is already active; "
-                                   "nested Runs are not supported")
-            self.start = time.time()
-            self.path = self.path.replace("{ts}", _path_ts(self.start))
-            self.stream = open(self.path, "w" if self.overwrite else "x",
-                               encoding="utf-8")
-            _active = self
+        _refuse_nested(_attached_runs())
+        self.start = time.time()
+        self.path = self.path.replace("{ts}", _path_ts(self.start))
+        self.stream = open(self.path, "w" if self.overwrite else "x",
+                           encoding="utf-8")
         try:
             self.handler = JsonlHandler(self.stream, self, self.level)
-            self.handler.addFilter(ScopeFilter())
+            self.handler.addFilter(ScopeFilter(self))
             root = logging.getLogger()
             self._root_level = root.level
             root.addHandler(self.handler)
+            # Another thread may have attached its Run since the check above.
+            _refuse_nested(_attached_runs(), self)
             lowest = self.level
             console = _console_level(self.console)
             if console is not None:
                 self.console_handler = ConsoleHandler(sys.stderr, self,
                                                       console)
-                self.console_handler.addFilter(ScopeFilter())
+                self.console_handler.addFilter(ScopeFilter(self))
                 root.addHandler(self.console_handler)
                 lowest = min(lowest, console)
             if root.level > lowest or root.level == logging.NOTSET:
@@ -761,7 +766,6 @@ class _Run(object):
         return False
 
     def _teardown(self):
-        global _active
         root = logging.getLogger()
         if self.handler is not None:
             root.removeHandler(self.handler)
@@ -772,9 +776,12 @@ class _Run(object):
             self.console_handler.close()
         if self.stream is not None:
             self.stream.close()
-        with _lock:
-            if _active is self:
-                _active = None
+
+
+def _refuse_nested(attached, run=None):
+    if any(other is not run for other in attached):
+        raise RuntimeError("dbfixlog.run() is already active; "
+                           "nested Runs are not supported")
 
 
 def run(path, *, mode, title=None, description=None, target=None, fields=None,

@@ -1,16 +1,25 @@
-"""Static guard for the Python 3.6.3 target (SPEC section 2).
+"""Static guard for the Python 3.6.3 target, for the shipped modules and
+the tests (which also run on 3.6).
 
-There is no 3.6 interpreter here, so this test parses the shipped Python
-files and fails on known 3.7+ constructs and imports. It is not a
-substitute for running the suite under real Python 3.6.
+There is no 3.6 interpreter here, so this test parses the Python files and
+fails on known 3.7+ constructs and imports. It is not a substitute for
+running the suite under real Python 3.6.
 """
 
 import ast
+import glob
 import os
 import unittest
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
-FILES = ["dbfixlog.py", "dbfixlog_render.py"]
+SHIPPED = ("dbfixlog.py", "dbfixlog_render.py")
+
+
+def python_files():
+    """The shipped modules plus every Python file under tests/."""
+    tests = sorted(os.path.relpath(p, ROOT) for p in glob.glob(
+        os.path.join(ROOT, "tests", "**", "*.py"), recursive=True))
+    return list(SHIPPED) + tests
 
 # Modules that don't exist in 3.6.
 NEW_MODULES = {
@@ -106,14 +115,14 @@ def problems(source, filename):
             add(node, "%s statement (3.10+)" % type(node).__name__)
         if (isinstance(node, (ast.AsyncFunctionDef, ast.AsyncFor, ast.AsyncWith,
                               ast.Await))):
-            add(node, "async code (asyncio scripts unsupported, SPEC 4.6)")
+            add(node, "async code (asyncio scripts are unsupported)")
     return found
 
 
 class Py36CompatTest(unittest.TestCase):
-    def test_shipped_python_files_avoid_37_plus_constructs(self):
+    def test_python_files_avoid_37_plus_constructs(self):
         checked = 0
-        for name in FILES:
+        for name in python_files():
             path = os.path.join(ROOT, name)
             if not os.path.exists(path):
                 continue
@@ -122,7 +131,7 @@ class Py36CompatTest(unittest.TestCase):
             checked += 1
             with self.subTest(file=name):
                 self.assertEqual(problems(source, name), [])
-        self.assertGreater(checked, 0, "no shipped Python file found")
+        self.assertGreater(checked, len(SHIPPED), "no test files found")
 
     def test_checker_catches_known_constructs(self):
         samples = [
