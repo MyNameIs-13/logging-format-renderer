@@ -1,0 +1,47 @@
+# Database Fix Logging
+
+A log format for scripts that check and modify databases, plus the readable, searchable HTML reports rendered from those logs.
+
+## Runs
+
+**Run**:
+One execution of a check/fix script, producing exactly one Log File.
+_Avoid_: job, session, execution
+
+**Dry Run**:
+A Run that inspects the database and records what it would change, without writing.
+_Avoid_: simulation, preview, test run
+
+**Write Run**:
+A Run that actually applies its Changes to the database.
+_Avoid_: live run, real run, apply run
+
+**Log File**:
+The machine-readable record of one Run, starting with a Run Header.
+_Avoid_: log, trace
+
+**Run Header**:
+The first record of a Log File, identifying the format version and describing the Run.
+_Avoid_: preamble, metadata line
+
+**Report**:
+The self-contained HTML page rendered from one Log File.
+_Avoid_: page, viewer, dashboard
+
+## Records
+
+**Message**:
+A free-text record, like an ordinary log line.
+_Avoid_: line, entry
+
+**Finding**:
+A record stating that a check detected something noteworthy in specific rows.
+_Avoid_: issue, problem, error, violation
+
+**Change**:
+A record of one field modification on one row, with old value, new value, and status (planned, applied, failed).
+_Avoid_: update, edit, fix, diff
+
+**Scope**:
+A named grouping around a root entity (e.g. customer 42) under which all records about it and its connected rows nest.
+_Avoid_: section, block, context, group
