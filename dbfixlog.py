@@ -311,7 +311,8 @@ def scope_label(kind, key=None, label=None):
 class ConsoleHandler(logging.Handler):
     """The terse stderr view: one line per record, prefixed by the label
     of the innermost Scope. Changes and Findings are summarised from their
-    ATTR fields; Messages use the stdlib message text. No colours."""
+    ATTR fields; Messages go through a stdlib ``logging.Formatter``
+    (message, exception and stack). Times are UTC. No colours."""
 
     def __init__(self, stream, run, level=logging.INFO):
         logging.Handler.__init__(self, level)
@@ -328,10 +329,7 @@ class ConsoleHandler(logging.Handler):
             elif rtype == "finding":
                 body = self._finding(data)
             else:
-                body = record.getMessage()
-                if record.exc_info:
-                    body += "\n" + self.formatter.formatException(
-                        record.exc_info)
+                body = self.format(record)
             self._line(record.created, record.levelno, record.levelname,
                        data.get("scope"), body)
         except Exception:
@@ -363,7 +361,8 @@ class ConsoleHandler(logging.Handler):
     def _line(self, created, levelno, levelname, path, body):
         if levelno < self.level:
             return
-        prefix = time.strftime("%H:%M:%S", time.localtime(created))
+        # The UTC hh:mm:ss of the record's ts, as the Report shows it.
+        prefix = _format_ts(created)[11:19]
         prefix += " %-5s " % levelname
         if path:
             label = self.run.scope_labels.get(path[-1])
