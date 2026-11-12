@@ -43,7 +43,7 @@
 //
 // The page also exposes its state for tests on <html>: data-state = "loading" | "ready" |
 // "error", data-record-count, and data-error (on error). Once ready, window.dbfixlogReport
-// is {model, list, onQuery} (see renderReport): the seam later tickets hook into.
+// is {model, list, filter, onQuery} (see renderReport): the seam later tickets hook into.
 // ---------------------------------------------------------------------------------------
 
 async function decodePayload(base64Text) {
@@ -228,6 +228,356 @@ function flatRows(m) {
 }
 
 // ---------------------------------------------------------------------------------------
+// Filters and search (ticket 08; pure). SPEC §6.3 pruning rule, §6.4 query syntax.
+// ---------------------------------------------------------------------------------------
+// A filter state is {view, q, level}:
+//   view:  "all" | "changes" | "findings" | "errors"   (default "all")
+//   q:     the search box text (default "")
+//   level: the level ≥ dropdown, a LEVELS name (default "DEBUG", meaning no level filter)
+// filterRows(m, state, mode, collapsed) returns {rows, active, matches, shown, ms}:
+//   rows:    record indices to show, in file order
+//   active:  whether a filter is active (§6.3); when false, rows are treeRows/flatRows
+//   matches: how many rows match the filter themselves (enclosing headers kept for the
+//            tree path are not counted)
+//   shown:   Map of Scope id -> matching entries inside it (any depth), or null when no
+//            filter is active. A header shows "k of n shown" with n = totals.records.
+
+const VIEWS = ["all", "changes", "findings", "errors"];
+const LEVEL_ALIASES = { WARN: "WARNING", ERR: "ERROR", CRIT: "CRITICAL", FATAL: "CRITICAL" };
+const QUERY_KEYS = ["level", "type", "table", "op", "status", "check", "logger", "key", "kind", "in",
+  "after", "before", "is"];
+
+function levelValue(name) {
+  const n = String(name || "").toUpperCase();
+  return LEVELS[LEVEL_ALIASES[n] || n] || 0;
+}
+
+// Splits on whitespace; double quotes group ("two words", f.city="new york") and are dropped.
+function queryTokens(text) {
+  return (String(text || "").match(/(?:[^\s"]+|"[^"]*"?)+/g) || []).map((t) => t.replace(/"/g, ""))
+    .filter((t) => t.length);
+}
+
+// parseQuery(text) -> Query. Terms combine with AND; comma lists inside a term are OR.
+// An unknown or malformed term (e.g. "foo:bar", "level>=loud") is kept as a plain word.
+function parseQuery(text) {
+  const Q = { words: [], minLevel: 0, levels: null, types: null, tables: null, ops: null, statuses: null,
+    checks: null, loggers: null, keys: [], kinds: null, ins: null, after: null, before: null,
+    fields: [], warn: false, unfinished: false, terms: 0 };
+  const list = (v) => v.toLowerCase().split(",").filter(Boolean);
+  const add = (prev, v) => { const s = prev || new Set(); for (const x of list(v)) s.add(x); return s; };
+  for (const tok of queryTokens(text)) {
+    let mm = tok.match(/^level>=(\w+)$/i);
+    if (mm && levelValue(mm[1])) {
+      Q.minLevel = Math.max(Q.minLevel, levelValue(mm[1])); Q.terms++; continue;
+    }
+    mm = tok.match(/^f\.([^=]+)=(.*)$/);
+    if (mm) { Q.fields.push([mm[1], mm[2].toLowerCase()]); Q.terms++; continue; }
+    mm = tok.match(/^(\w+):(.+)$/);
+    const k = mm && mm[1].toLowerCase();
+    const v = mm && mm[2];
+    let ok = !!mm && QUERY_KEYS.indexOf(k) >= 0;
+    if (ok) {
+      switch (k) {
+        case "level": {
+          const names = list(v).map((x) => LEVEL_ALIASES[x.toUpperCase()] || x.toUpperCase());
+          ok = names.every((x) => x in LEVELS);
+          if (ok) { Q.levels = Q.levels || new Set(); for (const x of names) Q.levels.add(x); }
+          break;
+        }
+        case "type": {
+          const s = add(Q.types, v);
+          if (s.has("scope")) { s.add("scope_start"); s.add("scope_end"); }
+          Q.types = s;
+          break;
+        }
+        case "table": Q.tables = add(Q.tables, v); break;
+        case "op": Q.ops = add(Q.ops, v); break;
+        case "status": Q.statuses = add(Q.statuses, v); break;
+        case "check": Q.checks = add(Q.checks, v); break;
+        case "logger": Q.loggers = (Q.loggers || []).concat(list(v)); break;
+        case "key": Q.keys.push(v.toLowerCase()); break;
+        case "kind": Q.kinds = add(Q.kinds, v); break;
+        case "in": {
+          const ids = v.split(",").filter(Boolean).map(Number);
+          ok = ids.length > 0 && ids.every((x) => Number.isInteger(x));
+          if (ok) { Q.ins = Q.ins || new Set(); for (const x of ids) Q.ins.add(x); }
+          break;
+        }
+        case "after": Q.after = v; break;
+        case "before": Q.before = v; break;
+        case "is": {
+          const w = v.toLowerCase();
+          if (w === "warn") Q.warn = true;
+          else if (w === "unfinished") Q.unfinished = true;
+          else ok = false;
+          break;
+        }
+      }
+    }
+    if (ok) Q.terms++;
+    else { Q.words.push(tok.toLowerCase()); Q.terms++; }
+  }
+  return Q;
+}
+
+// Search text, built once per model on first use (m.search). For an entry, hay is its own
+// text; for a Scope, scopeHay is kind + key + label (what enclosing-Scope matching sees).
+function textOf(v) {
+  if (v === undefined) return "";
+  if (v === null) return "null";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+function pairsText(o) {
+  if (!isPlainObject(o)) return textOf(o);
+  let s = "";
+  for (const k in o) s += k + "=" + textOf(o[k]) + " ";
+  return s;
+}
+const HAY_SKIP = { ts: 1, src: 1, logger: 1, scope: 1, key: 1, label: 1, fields: 1, changes: 1, duration_ms: 1 };
+
+function searchIndex(m) {
+  if (m.search) return m.search;
+  const recs = m.records;
+  const n = recs.length;
+  const hay = new Array(n);
+  const keyText = new Array(n);
+  const lv = new Uint8Array(n);
+  const time = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = recs[i];
+    time[i] = hms(r.ts);
+    keyText[i] = r.key === undefined ? "" : pairsText(r.key).toLowerCase();
+    if (isHeader(m, i)) {
+      const s = m.scopes.get(r.id);
+      lv[i] = s.outcome === "error" ? LEVELS.ERROR : levelValue(r.level);
+      hay[i] = (textOf(r.kind) + " " + keyText[i] + " " + pairsText(r.label) + " " + textOf(r.msg) + " " +
+        (s.outcome === "error" ? "scope error" : String(r.level || "").toLowerCase())).toLowerCase();
+      continue;
+    }
+    lv[i] = levelValue(r.level);
+    let h = keyText[i] + " " + pairsText(r.label) + " " + pairsText(r.fields) + " ";
+    if (isPlainObject(r.changes)) {
+      for (const f in r.changes) {
+        const c = r.changes[f];
+        h += f + " " + (isPlainObject(c) ? textOf(c.old) + " " + textOf(c.new) : textOf(c)) + " ";
+      }
+    }
+    for (const k in r) if (!HAY_SKIP[k]) h += textOf(r[k]) + " ";
+    if (r.type === "scope_end" && r.outcome === "error") h += "scope error";
+    hay[i] = h.toLowerCase();
+  }
+  const scopeHay = new Map();
+  const scopeKey = new Map();
+  for (const s of m.scopes.values()) {
+    const r = recs[s.start];
+    scopeKey.set(s.id, keyText[s.start]);
+    scopeHay.set(s.id, (textOf(r.kind) + " " + keyText[s.start] + " " + pairsText(r.label)).toLowerCase());
+  }
+  m.search = { hay: hay, keyText: keyText, lv: lv, time: time, scopeHay: scopeHay, scopeKey: scopeKey };
+  return m.search;
+}
+
+function normState(state) {
+  const s = state || {};
+  return {
+    view: VIEWS.indexOf(s.view) >= 0 ? s.view : "all",
+    q: typeof s.q === "string" ? s.q : "",
+    level: levelValue(s.level) ? String(s.level).toUpperCase() : "DEBUG",
+  };
+}
+
+// compileFilter(m, state) -> Filter: the parsed query plus the view and dropdown, with the
+// per-Scope work (word, key, kind hits) done once so matchRow stays cheap.
+function compileFilter(m, state) {
+  const st = normState(state);
+  const Q = parseQuery(st.q);
+  const F = Q;
+  F.state = st;
+  F.minLevel = Math.max(Q.minLevel, st.level === "DEBUG" ? 0 : levelValue(st.level));
+  if (st.view === "errors") F.minLevel = Math.max(F.minLevel, LEVELS.ERROR);
+  F.viewType = st.view === "changes" ? "change" : st.view === "findings" ? "finding" : null;
+  F.active = st.view !== "all" || Q.terms > 0 || F.minLevel > LEVELS.DEBUG;
+  if (!F.active) return F;
+  const ix = searchIndex(m);
+  F.ix = ix;
+  if (Q.words.length > 30) Q.words = Q.words.slice(0, 30); // bit mask per word below
+  F.full = (1 << Q.words.length) - 1;
+  // Per Scope: which words its kind/key/label contain (bit mask), whether every key: term
+  // matches its key, whether its kind is wanted.
+  F.scopeWords = new Map();
+  F.scopeKeys = new Map();
+  F.scopeKind = new Map();
+  for (const s of m.scopes.values()) {
+    const sh = ix.scopeHay.get(s.id);
+    let mask = 0;
+    for (let w = 0; w < Q.words.length; w++) if (sh.indexOf(Q.words[w]) >= 0) mask |= 1 << w;
+    if (mask) F.scopeWords.set(s.id, mask);
+    let km = 0;
+    const kt = ix.scopeKey.get(s.id);
+    for (let w = 0; w < Q.keys.length; w++) if (kt.indexOf(Q.keys[w]) >= 0) km |= 1 << w;
+    if (km) F.scopeKeys.set(s.id, km);
+    if (Q.kinds && Q.kinds.has(String(s.kind).toLowerCase())) F.scopeKind.set(s.id, true);
+  }
+  return F;
+}
+
+function lc(v) { return typeof v === "string" ? v.toLowerCase() : v === undefined || v === null ? "" : String(v).toLowerCase(); }
+
+function tableMatches(set, table) {
+  const t = lc(table);
+  if (!t) return false;
+  if (set.has(t)) return true;
+  const dot = t.lastIndexOf("."); // table:orders also finds shop.orders
+  return dot >= 0 && set.has(t.slice(dot + 1));
+}
+
+// The Scopes a row sits in for matching: its scope path, plus the Scope itself for that
+// Scope's own start (header) and end records.
+function rowScopes(r) {
+  const p = Array.isArray(r.scope) ? r.scope : [];
+  return r.type === "scope_start" || r.type === "scope_end" ? p.concat([r.id]) : p;
+}
+
+// Does row i (an entry or a Scope header) match the filter itself? A header matches on its
+// own kind, key, label, msg, Status (info, or scope error, as its level) and start time.
+function matchRow(m, i, F) {
+  const r = m.records[i];
+  const ix = F.ix;
+  const header = isHeader(m, i);
+  if (F.minLevel && ix.lv[i] < F.minLevel) return false;
+  if (F.levels) {
+    const name = header ? (ix.lv[i] === LEVELS.ERROR ? "ERROR" : String(r.level).toUpperCase()) : String(r.level).toUpperCase();
+    if (!F.levels.has(LEVEL_ALIASES[name] || name)) return false;
+  }
+  if (F.viewType && r.type !== F.viewType) return false;
+  if (F.types && !F.types.has(lc(r.type))) return false;
+  if (F.unfinished && !(header && m.scopes.get(r.id).outcome === "unfinished")) return false;
+  if (F.warn && !m.warn[i]) return false;
+  if (header) {
+    if (F.tables || F.ops || F.statuses || F.checks || F.fields.length) return false;
+  } else {
+    if (F.tables && !tableMatches(F.tables, r.table)) return false;
+    if (F.ops && !F.ops.has(lc(r.op))) return false;
+    if (F.statuses && !F.statuses.has(lc(r.status))) return false;
+    if (F.checks && !F.checks.has(lc(r.check))) return false;
+  }
+  if (F.loggers) {
+    const lg = lc(r.logger);
+    let any = false;
+    for (const p of F.loggers) if (lg.startsWith(p)) { any = true; break; }
+    if (!any) return false;
+  }
+  if (F.after !== null && ix.time[i].slice(0, F.after.length) < F.after) return false;
+  if (F.before !== null && ix.time[i].slice(0, F.before.length) > F.before) return false;
+  const needScopes = F.ins || F.kinds || F.keys.length || F.words.length;
+  const sc = needScopes ? rowScopes(r) : null;
+  if (F.ins) {
+    let any = false;
+    for (const id of sc) if (F.ins.has(id)) { any = true; break; }
+    if (!any) return false;
+  }
+  if (F.kinds) {
+    let any = false;
+    for (const id of sc) if (F.scopeKind.has(id)) { any = true; break; }
+    if (!any) return false;
+  }
+  if (F.keys.length) {
+    let mask = 0;
+    const kt = ix.keyText[i];
+    for (let w = 0; w < F.keys.length; w++) if (kt.indexOf(F.keys[w]) >= 0) mask |= 1 << w;
+    for (const id of sc) mask |= F.scopeKeys.get(id) || 0;
+    if (mask !== (1 << F.keys.length) - 1) return false;
+  }
+  if (F.fields.length && !fieldsMatch(r, F.fields)) return false;
+  if (F.words.length) {
+    let mask = 0;
+    for (const id of sc) mask |= F.scopeWords.get(id) || 0;
+    if (mask !== F.full) {
+      const h = ix.hay[i];
+      for (let w = 0; w < F.words.length; w++) if (!(mask & (1 << w)) && h.indexOf(F.words[w]) >= 0) mask |= 1 << w;
+      if (mask !== F.full) return false;
+    }
+  }
+  return true;
+}
+
+// f.<field>=<value>: equal (ignoring case) to fields[field] or to a changed field's old or
+// new value. NULL is written f.x=null, an empty string f.x= .
+function fieldsMatch(r, terms) {
+  for (const [k, v] of terms) {
+    const vals = [];
+    if (isPlainObject(r.fields) && k in r.fields) vals.push(r.fields[k]);
+    if (isPlainObject(r.changes) && isPlainObject(r.changes[k])) vals.push(r.changes[k].old, r.changes[k].new);
+    let any = false;
+    for (const x of vals) if (x !== undefined && textOf(x).toLowerCase() === v) { any = true; break; }
+    if (!any) return false;
+  }
+  return true;
+}
+
+function filterRows(m, state, mode, collapsed) {
+  const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const F = compileFilter(m, state);
+  const coll = collapsed || new Set();
+  const flat = mode === "flat";
+  const out = { rows: null, active: F.active, matches: 0, shown: null, filter: F, ms: 0 };
+  if (!F.active) {
+    out.rows = flat ? flatRows(m) : treeRows(m, coll);
+    out.matches = out.rows.length;
+  } else {
+    const recs = m.records;
+    const n = recs.length;
+    const hit = new Uint8Array(n);
+    const shown = new Map();
+    const keep = new Set(); // tree: Scope ids whose header shows
+    let matches = 0;
+    for (let i = 0; i < n; i++) {
+      if (!isRow(m, i) || !matchRow(m, i, F)) continue;
+      hit[i] = 1;
+      matches++;
+      const r = recs[i];
+      const header = isHeader(m, i);
+      const p = Array.isArray(r.scope) ? r.scope : [];
+      if (!header) for (const id of p) shown.set(id, (shown.get(id) || 0) + 1);
+      if (!flat) {
+        if (header) keep.add(r.id);
+        for (const id of p) keep.add(id);
+      }
+    }
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      if (flat) { if (hit[i]) rows.push(i); continue; }
+      const r = recs[i];
+      if (isHeader(m, i) ? !keep.has(r.id) : !hit[i]) continue;
+      if (anyIn(r.scope, coll)) continue;
+      rows.push(i);
+    }
+    out.rows = rows;
+    out.matches = matches;
+    out.shown = shown;
+  }
+  out.ms = (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0;
+  return out;
+}
+
+// Static counts for the view buttons: entries per view (Errors = level ≥ ERROR, so failed
+// Changes, error Findings and Messages, and Scopes that raised; never unfinished Scopes).
+function viewCounts(m) {
+  const c = { all: 0, changes: 0, findings: 0, errors: 0 };
+  for (let i = 0; i < m.records.length; i++) {
+    const r = m.records[i];
+    if (!isEntry(r)) continue;
+    c.all++;
+    if (r.type === "change") c.changes++;
+    else if (r.type === "finding") c.findings++;
+    if (levelValue(r.level) >= LEVELS.ERROR) c.errors++;
+  }
+  return c;
+}
+
+// ---------------------------------------------------------------------------------------
 // Cells (pure; return HTML strings)
 // ---------------------------------------------------------------------------------------
 
@@ -322,7 +672,9 @@ function statusHTML(m, i) {
 }
 
 // Derived totals for a Scope header: records, planned/applied/failed, Findings, duration.
-function totalsHTML(m, s) {
+// shown (Map of Scope id -> matching entries, from filterRows) adds "k of n shown" while a
+// filter is active; null or undefined without one.
+function totalsHTML(m, s, shown) {
   const t = s.totals;
   const parts = [plural(t.records, "record", "records")];
   if (t.planned) parts.push(t.planned + " planned");
@@ -330,15 +682,16 @@ function totalsHTML(m, s) {
   if (t.failed) parts.push('<span class="out-error">' + t.failed + " failed</span>");
   if (t.findings) parts.push(plural(t.findings, "Finding", "Findings"));
   if (t.duration_ms !== null) parts.push(duration(t.duration_ms));
+  if (shown) parts.push((shown.get(s.id) || 0) + " of " + t.records + " shown");
   return parts.join(" · ");
 }
 
-function detailsHTML(m, i) {
+function detailsHTML(m, i, shown) {
   const r = m.records[i];
   const msg = r.msg !== undefined ? ' <span class="msg">' + esc(r.msg) + "</span>" : "";
   if (isHeader(m, i)) {
     const s = m.scopes.get(r.id);
-    return (r.msg !== undefined ? esc(r.msg) + " · " : "") + '<span class="dim">' + totalsHTML(m, s) + "</span>";
+    return (r.msg !== undefined ? esc(r.msg) + " · " : "") + '<span class="dim">' + totalsHTML(m, s, shown) + "</span>";
   }
   switch (r.type) {
     case "change": {
@@ -392,8 +745,8 @@ function scopeCellHTML(m, i, mode, collapsed) {
   return h + "</span>";
 }
 
-// The eight column cells (see COLUMNS) of row i, as HTML strings.
-function rowCells(m, i, mode, collapsed) {
+// The eight column cells (see COLUMNS) of row i, as HTML strings. shown: see totalsHTML.
+function rowCells(m, i, mode, collapsed, shown) {
   const r = m.records[i];
   const header = isHeader(m, i);
   let key = "";
@@ -408,7 +761,7 @@ function rowCells(m, i, mode, collapsed) {
     !header && r.table !== undefined ? '<span class="tbl">' + esc(r.table) + "</span>" : "",
     key,
     labelHTML(r.label),
-    detailsHTML(m, i),
+    detailsHTML(m, i, shown),
   ];
 }
 
@@ -675,7 +1028,7 @@ function createList(doc, wrap, m) {
       for (let k = a; k < b; k++) {
         const i = list.rows[k];
         h += '<div class="vr grid ' + rowClass(m, i) + '" data-i="' + i + '" style="top:' + k * ROW_HEIGHT + 'px">' +
-          rowCells(m, i, list.mode, list.collapsed).map((c) => "<span>" + c + "</span>").join("") + "</div>";
+          rowCells(m, i, list.mode, list.collapsed, list.shown).map((c) => "<span>" + c + "</span>").join("") + "</div>";
       }
       box.innerHTML = h;
       head.style.transform = "translateX(" + -el.scrollLeft + "px)";
@@ -719,13 +1072,19 @@ function installListTools(doc, app, report) {
   panel.className = "panel";
   panel.hidden = true;
   main.appendChild(panel);
-  const tools = doc.createElement("div");
-  tools.id = "treetools";
-  tools.innerHTML = '<span class="treebtns">' +
-    '<button data-foldall="none" title="Expand all Scopes">Expand all</button>' +
-    '<button data-foldall="phases" title="Fold entity Scopes, keep phases open">Fold to phases</button>' +
-    '<button data-foldall="all" title="Fold all Scopes">Fold all</button></span>';
-  main.parentNode.insertBefore(tools, main);
+  // Fold buttons go in the filter bar's .fold-slot (ticket 08), else in their own #treetools.
+  const btns = '<span class="treebtns">' +
+    '<button type="button" data-foldall="none" title="Expand all Scopes">Expand all</button>' +
+    '<button type="button" data-foldall="phases" title="Fold entity Scopes, keep phases open">Fold to phases</button>' +
+    '<button type="button" data-foldall="all" title="Fold all Scopes">Fold all</button></span>';
+  let tools = app.querySelector(".fold-slot");
+  if (tools) tools.innerHTML = btns;
+  else {
+    tools = doc.createElement("div");
+    tools.id = "treetools";
+    tools.innerHTML = btns;
+    main.parentNode.insertBefore(tools, main);
+  }
   const stick = doc.createElement("div");
   stick.className = "stick";
   wrap.appendChild(stick);
@@ -773,7 +1132,7 @@ function installListTools(doc, app, report) {
     ids.forEach((id, d) => {
       const i = m.scopes.get(id).start;
       h += '<div class="vr grid srow ' + rowClass(m, i) + '" data-sid="' + id + '" style="top:' + d * ROW_HEIGHT + 'px">' +
-        rowCells(m, i, "tree", list.collapsed).map((c) => "<span>" + c + "</span>").join("") + "</div>";
+        rowCells(m, i, "tree", list.collapsed, list.shown).map((c) => "<span>" + c + "</span>").join("") + "</div>";
     });
     stick.innerHTML = h ? '<div class="sinner" style="transform:translateX(' + -el.scrollLeft + 'px)">' + h + "</div>" : "";
     stick.style.height = ids.length * ROW_HEIGHT + "px";
@@ -851,6 +1210,118 @@ function installListTools(doc, app, report) {
   list.setWidths(widths);
 }
 
+// ---------------------------------------------------------------------------------------
+// Filter bar (ticket 08; browser only). Views with counts, search box, level ≥, Tree/Flat.
+// ---------------------------------------------------------------------------------------
+// createFilterBar returns the filter API (window.dbfixlogReport.filter):
+//   get()          -> a copy of the state {view, q, level} (see filterRows)
+//   set(partial)   -> merges into the state, updates the controls and refreshes the list
+//   query(q)       -> shows exactly what q matches: view All, level DEBUG, search box q.
+//                     Notice links and summary-card numbers (ticket 09) use this.
+//   last           -> the latest filterRows result {rows, active, matches, shown, ms}
+// It installs itself as list.rowSource and sets list.shown for "k of n shown".
+
+const VIEW_LABELS = { all: "All", changes: "Changes", findings: "Findings", errors: "Errors" };
+
+const SEARCH_HELP =
+  "<p>Words match a record's text and the kind, key and label of the Scopes it sits in. " +
+  "All words and terms must match. Use quotes for spaces: <code>\"two words\"</code>.</p><table>" +
+  [["level>=warning, level:error,info", "level"],
+    ["type:change,finding,message,scope", "record type"],
+    ["table:orders  op:update  status:failed  check:name", "that field"],
+    ["logger:fix", "logger name (prefix)"],
+    ["key:156", "key, including enclosing Scopes' keys"],
+    ["kind:customer", "Scope kind"],
+    ["in:12", "records inside Scope 12"],
+    ["after:20:05  before:20:06:30", "time (UTC, as shown), inclusive"],
+    ["f.city=gent  f.note=null  f.note=", "fields and changed fields (old or new)"],
+    ["is:warn", "Change status that doesn't fit the Run's mode"],
+    ["is:unfinished", "unfinished Scopes"]].map((r) => "<tr><td><code>" + esc(r[0]) + "</code></td><td>" + r[1] + "</td></tr>").join("") +
+  "</table><p>While a filter is active, a Scope shows when it matches itself or holds a visible row; " +
+  "its header then adds \"k of n shown\". In Flat mode Scope rows show only when they match.</p>" +
+  "<p><span class=\"null\">NULL</span> and <span class=\"empty\">(empty)</span> are shown as logged, " +
+  "but the Uniface database loader doesn't reliably tell NULL and empty strings apart, so treat " +
+  "them as possibly the same.</p>";
+
+function filterBarHTML(m) {
+  const c = viewCounts(m);
+  const lv = Object.keys(LEVELS);
+  return '<div class="fbar">' +
+    '<span class="seg views">' + VIEWS.map((v) =>
+      '<button type="button" data-view="' + v + '" class="' + (v === "all" ? "on" : "") +
+      (v === "errors" && c.errors ? " haserr" : "") + '">' + VIEW_LABELS[v] + ' <span class="n">' +
+      c[v].toLocaleString("en") + "</span></button>").join("") + "</span>" +
+    '<input type="search" name="q" spellcheck="false" autocomplete="off" ' +
+    'placeholder="search… e.g. acme status:failed, key:156, f.city=gent">' +
+    '<details class="qhelp"><summary title="search help">?</summary><div class="qhelp-body">' + SEARCH_HELP +
+    "</div></details>" +
+    '<label class="lvl">level ≥ <select name="level">' + lv.map((l) =>
+      '<option value="' + l + '">' + (l === "DEBUG" ? "all" : l.toLowerCase()) + "</option>").join("") +
+    "</select></label>" +
+    '<span class="seg modes"><button type="button" data-mode="tree" class="on">Tree</button>' +
+    '<button type="button" data-mode="flat">Flat</button></span>' +
+    '<span class="fold-slot"></span>' + // fold buttons (ticket 10)
+    '<span class="fcount dim"></span></div>';
+}
+
+function createFilterBar(doc, bar, list, m, listEl) {
+  bar.innerHTML = filterBarHTML(m);
+  const input = bar.querySelector("input[name=q]");
+  const select = bar.querySelector("select[name=level]");
+  const count = bar.querySelector(".fcount");
+  let state = normState({});
+  let timer = 0;
+  const filter = {
+    last: null,
+    get() { return Object.assign({}, state); },
+    set(partial) {
+      clearTimeout(timer);
+      state = normState(Object.assign({}, state, partial));
+      if (input.value !== state.q) input.value = state.q;
+      if (listEl) listEl.scrollTop = 0;
+      list.refresh();
+    },
+    query(q) { filter.set({ view: "all", level: "DEBUG", q: String(q) }); },
+  };
+  function sync() {
+    for (const b of bar.querySelectorAll("[data-view]")) b.classList.toggle("on", b.dataset.view === state.view);
+    for (const b of bar.querySelectorAll("[data-mode]")) b.classList.toggle("on", b.dataset.mode === list.mode);
+    const fold = bar.querySelector(".fold-slot");
+    if (fold) fold.hidden = list.mode !== "tree"; // fold buttons (ticket 10) only act in Tree mode
+    select.value = state.level;
+    const r = filter.last;
+    count.textContent = r.active
+      ? r.matches.toLocaleString("en") + " matching · " + r.rows.length.toLocaleString("en") + " rows"
+      : r.rows.length.toLocaleString("en") + " rows";
+  }
+  list.rowSource = (model, mode, collapsed) => {
+    const r = filterRows(model, state, mode, collapsed);
+    filter.last = r;
+    list.shown = r.shown;
+    sync();
+    return r.rows;
+  };
+  bar.addEventListener("click", (e) => {
+    const v = e.target.closest("[data-view]");
+    if (v) { filter.set({ view: v.dataset.view }); return; }
+    const md = e.target.closest("[data-mode]");
+    if (md) { if (listEl) listEl.scrollTop = 0; list.setMode(md.dataset.mode); }
+  });
+  select.addEventListener("change", () => filter.set({ level: select.value }));
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => filter.set({ q: input.value }), 150);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") filter.set({ q: input.value });
+    else if (e.key === "Escape") filter.set({ q: "" });
+  });
+  // Build the search index while idle, so the first keystroke doesn't pay for it.
+  const idle = doc.defaultView.requestIdleCallback || ((f) => setTimeout(f, 50));
+  idle(() => searchIndex(m));
+  return filter;
+}
+
 function renderReport(doc, app, payload) {
   const m = buildModel(payload);
   app.innerHTML = '<div class="report">' + runHeaderHTML(m) +
@@ -858,16 +1329,12 @@ function renderReport(doc, app, payload) {
     '<div id="cards"></div><div id="bar"></div>' + // slots: summary cards (09), filter bar (08)
     '<div class="listwrap"></div></div>';
   const list = createList(doc, app.querySelector(".listwrap"), m);
+  const filter = createFilterBar(doc, app.querySelector("#bar"), list, m, app.querySelector(".listwrap .list"));
   const report = {
-    model: m, list: list,
-    // Applies a query from a notice link. Ticket 08 replaces this with the real filter;
-    // until then "is:warn" jumps to the first mismatched Change.
-    onQuery(q) {
-      if (q === "is:warn" && m.warnings.length) list.scrollToRecord(m.warnings[0]);
-      else if (q === "is:unfinished" && m.unfinishedScopes.length) {
-        list.scrollToRecord(m.scopes.get(m.unfinishedScopes[0]).start);
-      } else if (/^in:\d+$/.test(q)) report.reveal(Number(q.slice(3))); // "show only this Scope"
-    },
+    model: m, list: list, filter: filter,
+    // Applies a query from a [data-q] link (notices, the mode strip, summary cards, and the
+    // details panel's "show only this Scope", which is in:<id>).
+    onQuery(q) { filter.query(q); },
   };
   installListTools(doc, app, report);
   app.addEventListener("click", (e) => {
@@ -900,6 +1367,7 @@ if (typeof document !== "undefined") startReport(document);
 if (typeof module !== "undefined") module.exports = {
   decodePayload, buildModel, modeStrip, runNotices, isEntry, isHeader, isRow, treeRows, flatRows,
   rowCells, rowClass, valueHTML, scopeName, hms, duration, esc, LEVELS, COLUMNS,
+  parseQuery, compileFilter, matchRow, filterRows, viewCounts, VIEWS,
   // ticket 10
   foldSet, stickyScopes, loadWidths, saveWidths, WIDTHS_KEY, DEFAULT_WIDTHS,
 };

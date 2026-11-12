@@ -130,8 +130,15 @@ class DetailsPanelInFirefox(unittest.TestCase):
           out.shown = !!row(2);
           out.selected = !!row(2) && row(2).classList.contains('sel');
           out.title = panel.querySelector('h3').textContent;
-          R.onQuery('in:2');  // until ticket 08: scrolls to the Scope
+          q('a[data-q]', panel)[0].click();  // "show only this Scope": filters to in:2 (ticket 08)
           out.afterQuery = !!row(2);
+          out.query = R.filter.get().q;
+          out.filtered = R.list.rows.slice();
+          R.list.setMode('flat');
+          q('.crumb [data-reveal]', panel)[0].click();  // reveal switches back to Tree ...
+          out.mode = R.list.mode;
+          out.treeOn = document.querySelector('[data-mode="tree"]').classList.contains('on');  // ... and the switch follows
+          out.flatOn = document.querySelector('[data-mode="flat"]').classList.contains('on');
         """)
         self.assertTrue(out["hidden"])
         self.assertEqual(out["collapsed"], [])
@@ -139,6 +146,9 @@ class DetailsPanelInFirefox(unittest.TestCase):
         self.assertTrue(out["selected"])
         self.assertIn("customer ACME", out["title"])
         self.assertTrue(out["afterQuery"])
+        self.assertEqual(out["query"], "in:2")
+        self.assertEqual(out["filtered"], [1, 2, 3, 4, 5])  # phase 1 kept as an enclosing Scope
+        self.assertEqual([out["mode"], out["treeOn"], out["flatOn"]], ["tree", True, False])
 
     # Record indices: 1 phase{ 2 customer{ 3..62 changes } 63 end, 64 customer{ 65..124 } 125 end } 126 end,
     # 127 phase{ 128 message } 129 end. Tree rows: 1, 2, 3..62, 64, 65..124, 127, 128.
@@ -193,10 +203,17 @@ class DetailsPanelInFirefox(unittest.TestCase):
           out.phases = click('phases');
           out.all = click('all');
           out.none = click('none').slice(0, 4);
+          out.inBar = !!document.querySelector('#bar .fold-slot [data-foldall="all"]');
+          R.list.setMode('flat'); out.hiddenInFlat = document.querySelector('.fold-slot').hidden;
+          document.querySelector('[data-mode="tree"]').click();
+          out.shownInTree = !document.querySelector('.fold-slot').hidden;
         """)
         self.assertEqual(out["phases"], [1, 2, 64, 127, 128])
         self.assertEqual(out["all"], [1, 127])
         self.assertEqual(out["none"], [1, 2, 3, 4])
+        self.assertTrue(out["inBar"])
+        self.assertTrue(out["hiddenInFlat"])
+        self.assertTrue(out["shownInTree"])
 
     def test_resize_remembers_widths_and_double_click_resets(self):
         report = self.long_report("resize")
