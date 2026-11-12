@@ -1,4 +1,4 @@
-// Report viewer for Database Fix Logging. Plain script: no modules, no build step.
+// Report code for Database Fix Logging. Plain script: no modules, no build step.
 // dbfixlog_render.py inlines this file (and report.css) into every Report.
 //
 // ---------------------------------------------------------------------------------------
@@ -24,7 +24,7 @@
 //   }
 //
 // records[0] is always the run_start (Run Header); the renderer refuses anything else.
-// Records are the Log File's JSON objects unchanged (SPEC §3), including unknown types.
+// Records are the Log File's JSON objects unchanged, including unknown types.
 // A record's id within the Report is its index i; its line number is lines[i] (the two
 // differ when malformed lines were skipped).
 //
@@ -43,8 +43,8 @@
 //
 // The page also exposes its state for tests on <html>: data-state = "loading" | "ready" |
 // "error", data-record-count, and data-error (on error). Once ready, window.dbfixlogReport
-// is {model, list, filter, onQuery, timing} (see renderReport and startReport): the seam later
-// tickets hook into. timing = {decode, render, ready, nav} in ms; <html data-ready-ms> too.
+// is {model, list, filter, onQuery, timing} (see renderReport and startReport), which
+// the browser tests drive. timing = {decode, render, ready, nav} in ms; <html data-ready-ms> too.
 // ---------------------------------------------------------------------------------------
 
 async function decodePayload(base64Text) {
@@ -52,7 +52,7 @@ async function decodePayload(base64Text) {
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
   // Copy the inflated chunks into one buffer sized from the gzip trailer (ISIZE, the
   // uncompressed size mod 2^32), then decode once. At 100k records this is ~2x faster in
-  // Firefox than Response.text() or .arrayBuffer() (ticket 11). The buffer still grows if
+  // Firefox than Response.text() or .arrayBuffer(). The buffer still grows if
   // the hint is short.
   const n = bytes.length < 18 ? 0 : (bytes[bytes.length - 4] | bytes[bytes.length - 3] << 8 |
     bytes[bytes.length - 2] << 16 | bytes[bytes.length - 1] << 24) >>> 0;
@@ -86,7 +86,7 @@ function base64Bytes(text) {
 // ---------------------------------------------------------------------------------------
 // buildModel(payload) derives everything the views need from the verbatim records.
 // A record's id is its index i into model.records. Per-record derived data lives in
-// parallel arrays (model.lv, model.warn) so the records themselves stay verbatim.
+// parallel arrays (model.warn, model.odd) so the records themselves stay verbatim.
 
 function buildModel(payload) {
   const records = payload.records;
@@ -202,7 +202,7 @@ function oddFields(r) {
 function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
 
 // The full-width Dry Run strip, or null for a Write Run. It only claims what the Log File
-// shows. q is the query a "Show them" link should apply (wired by the filter bar, ticket 08).
+// shows. q is the query a "Show them" link should apply (wired by the filter bar).
 function modeStrip(m) {
   if (m.mode !== "dry") return null;
   const n = m.warnings.length;
@@ -263,7 +263,7 @@ function hms(ts) { return typeof ts === "string" ? ts.slice(11, 23) : ""; }
 
 // ---------------------------------------------------------------------------------------
 // Row lists (pure). A row is a record index: a scope_start index is that Scope's header
-// row, any other index is an entry. Ticket 08 adds filtering and pruning on top of these.
+// row, any other index is an entry. filterRows adds filtering and pruning on top of these.
 // ---------------------------------------------------------------------------------------
 
 function isHeader(m, i) {
@@ -302,7 +302,7 @@ function flatRows(m) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Filters and search (ticket 08; pure). SPEC §6.3 pruning rule, §6.4 query syntax.
+// Filters and search (pure): the Scope-header pruning rule and the query syntax.
 // ---------------------------------------------------------------------------------------
 // A filter state is {view, q, level}:
 //   view:  "all" | "changes" | "findings" | "errors"   (default "all")
@@ -310,7 +310,7 @@ function flatRows(m) {
 //   level: the level ≥ dropdown, a LEVELS name (default "DEBUG", meaning no level filter)
 // filterRows(m, state, mode, collapsed) returns {rows, active, matches, shown, ms}:
 //   rows:    record indices to show, in file order
-//   active:  whether a filter is active (§6.3); when false, rows are treeRows/flatRows
+//   active:  whether a filter is active; when false, rows are treeRows/flatRows
 //   matches: how many rows match the filter themselves (enclosing headers kept for the
 //            tree path are not counted)
 //   shown:   Map of Scope id -> matching entries inside it (any depth), or null when no
@@ -417,7 +417,7 @@ function searchIndex(m) {
   const n = recs.length;
   const hay = new Array(n);
   const keyText = new Array(n);
-  const lv = new Uint8Array(n);
+  const levelOf = new Uint8Array(n);
   const time = new Array(n);
   for (let i = 0; i < n; i++) {
     const r = recs[i];
@@ -425,12 +425,12 @@ function searchIndex(m) {
     keyText[i] = r.key === undefined ? "" : pairsText(r.key).toLowerCase();
     if (isHeader(m, i)) {
       const s = m.scopes.get(r.id);
-      lv[i] = s.outcome === "error" ? LEVELS.ERROR : levelValue(r.level);
+      levelOf[i] = s.outcome === "error" ? LEVELS.ERROR : levelValue(r.level);
       hay[i] = (textOf(r.kind) + " " + keyText[i] + " " + pairsText(r.label) + " " + textOf(r.msg) + " " +
         (s.outcome === "error" ? "scope error" : String(r.level || "").toLowerCase())).toLowerCase();
       continue;
     }
-    lv[i] = levelValue(r.level);
+    levelOf[i] = levelValue(r.level);
     let h = keyText[i] + " " + pairsText(r.label) + " " + pairsText(r.fields) + " ";
     if (isPlainObject(r.changes)) {
       for (const f in r.changes) {
@@ -449,7 +449,7 @@ function searchIndex(m) {
     scopeKey.set(s.id, keyText[s.start]);
     scopeHay.set(s.id, (textOf(r.kind) + " " + keyText[s.start] + " " + pairsText(r.label)).toLowerCase());
   }
-  m.search = { hay: hay, keyText: keyText, lv: lv, time: time, scopeHay: scopeHay, scopeKey: scopeKey };
+  m.search = { hay: hay, keyText: keyText, levelOf: levelOf, time: time, scopeHay: scopeHay, scopeKey: scopeKey };
   return m.search;
 }
 
@@ -512,9 +512,9 @@ function matchRow(m, i, F) {
   const r = m.records[i];
   const ix = F.ix;
   const header = isHeader(m, i);
-  if (F.minLevel && ix.lv[i] < F.minLevel) return false;
+  if (F.minLevel && ix.levelOf[i] < F.minLevel) return false;
   if (F.levels) {
-    const name = header ? (ix.lv[i] === LEVELS.ERROR ? "ERROR" : String(r.level).toUpperCase()) : String(r.level).toUpperCase();
+    const name = header ? (ix.levelOf[i] === LEVELS.ERROR ? "ERROR" : String(r.level).toUpperCase()) : String(r.level).toUpperCase();
     if (!F.levels.has(LEVEL_ALIASES[name] || name)) return false;
   }
   if (F.viewType && r.type !== F.viewType) return false;
@@ -647,7 +647,7 @@ function viewCounts(m) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Summary cards (ticket 09; pure)
+// Summary cards (pure)
 // ---------------------------------------------------------------------------------------
 // summaryCounts(m) -> {changes, findings, kinds}:
 //   changes:  {rows: [{table, op, planned, applied, failed, all}], total: {planned, applied, failed, all}}
@@ -685,11 +685,11 @@ function summaryCounts(m) {
   }
   const opRank = (op) => { const k = CHANGE_OPS.indexOf(op); return k < 0 ? CHANGE_OPS.length : k; };
   const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-  const crows = Array.from(changes.values()).sort((a, b) =>
+  const changeRows = Array.from(changes.values()).sort((a, b) =>
     cmp(a.table, b.table) || opRank(a.op) - opRank(b.op) || cmp(a.op, b.op));
-  const lv = Array.from(levels).sort((a, b) => (LEVELS[a] || 99) - (LEVELS[b] || 99) || cmp(a, b));
-  const frows = Array.from(checks.values()).sort((a, b) => cmp(a.check, b.check));
-  for (const row of frows) for (const l of lv) row[l] = row[l] || 0;
+  const findingLevels = Array.from(levels).sort((a, b) => (LEVELS[a] || 99) - (LEVELS[b] || 99) || cmp(a, b));
+  const findingRows = Array.from(checks.values()).sort((a, b) => cmp(a.check, b.check));
+  for (const row of findingRows) for (const l of findingLevels) row[l] = row[l] || 0;
   const kinds = new Map();
   for (const s of m.scopes.values()) {
     const kind = textOf(s.kind);
@@ -699,7 +699,7 @@ function summaryCounts(m) {
     if (s.outcome === "error") k.error++;
     else if (s.outcome === "unfinished") k.unfinished++;
   }
-  return { changes: { rows: crows, total: total }, findings: { levels: lv, rows: frows }, kinds: Array.from(kinds.values()) };
+  return { changes: { rows: changeRows, total: total }, findings: { levels: findingLevels, rows: findingRows }, kinds: Array.from(kinds.values()) };
 }
 
 // A query value, quoted when it holds whitespace (queryTokens groups on double quotes).
@@ -719,7 +719,7 @@ function cardNum(n, q, red) {
     n.toLocaleString("en") + "</a></td>";
 }
 
-// The foldable summary cards (SPEC §6.2 item 3), or "" when there is nothing to count.
+// The foldable summary cards, or "" when there is nothing to count.
 // Failed Changes are red when non-zero; applied ones too in a Dry Run.
 function cardsHTML(m) {
   const c = summaryCounts(m);
@@ -744,12 +744,12 @@ function cardsHTML(m) {
     cards.push('<div class="card" data-card="changes"><h4>Changes</h4><table>' + head + body + foot + "</table></div>");
   }
   if (c.findings.rows.length) {
-    const lv = c.findings.levels;
-    const head = "<tr><th>check</th>" + lv.map((l) => "<th>" + esc(l.toLowerCase()) + "</th>").join("") + "<th>all</th></tr>";
+    const levels = c.findings.levels;
+    const head = "<tr><th>check</th>" + levels.map((l) => "<th>" + esc(l.toLowerCase()) + "</th>").join("") + "<th>all</th></tr>";
     const body = c.findings.rows.map((r) => {
       const ck = queryTerm("check", r.check);
       return '<tr><td class="mono">' + esc(r.check) + "</td>" +
-        lv.map((l) => cardNum(r[l], joinTerms([ck, queryTerm("level", l.toLowerCase())]), levelValue(l) >= LEVELS.ERROR)).join("") +
+        levels.map((l) => cardNum(r[l], joinTerms([ck, queryTerm("level", l.toLowerCase())]), levelValue(l) >= LEVELS.ERROR)).join("") +
         cardNum(r.all, ck, false) + "</tr>";
     }).join("");
     cards.push('<div class="card" data-card="findings"><h4>Findings</h4><table>' + head + body + "</table></div>");
@@ -891,14 +891,9 @@ function detailsHTML(m, i, shown) {
   }
   switch (r.type) {
     case "change": {
-      let h = "";
-      if (isPlainObject(r.changes)) {
-        h = Object.keys(r.changes).map((f) => {
-          const c = isPlainObject(r.changes[f]) ? r.changes[f] : {};
-          return '<span class="fld">' + esc(f) + ":</span> " + valueHTML(c.old) +
-            '<span class="arrow"> → </span>' + valueHTML(c.new);
-        }).join("  ");
-      }
+      let h = changeEntries(r).map(([f, c]) =>
+        '<span class="fld">' + esc(f) + ":</span> " + valueHTML(c.old) +
+        '<span class="arrow"> → </span>' + valueHTML(c.new)).join("  ");
       if (isPlainObject(r.error)) {
         h += (h ? " " : "") + '<span class="out-error">' + esc(r.error.type) + ": " + esc(r.error.message) + "</span>";
       }
@@ -916,6 +911,12 @@ function detailsHTML(m, i, shown) {
     default: // unknown type: generic row
       return '<span class="dim">' + esc(r.type) + ":</span>" + msg + fieldsHTML(r.fields, true);
   }
+}
+
+// A Change's field changes as [field, {old, new}] pairs; [] when it has none.
+function changeEntries(r) {
+  if (!isPlainObject(r.changes)) return [];
+  return Object.keys(r.changes).map((f) => [f, isPlainObject(r.changes[f]) ? r.changes[f] : {}]);
 }
 
 function fieldsHTML(f, lead) {
@@ -989,7 +990,7 @@ function isEntry(r) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Folding, sticky Scopes, details panel, column widths (pure; ticket 10)
+// Folding, sticky Scopes, details panel, column widths (pure)
 // ---------------------------------------------------------------------------------------
 
 // The collapsed set for a fold button: "all" folds every Scope, "phases" folds every entity
@@ -1087,11 +1088,9 @@ function recordDetailsHTML(m, i) {
   if (isPlainObject(r.changes)) {
     h += '<section><b>Field changes</b><table class="fchanges">' +
       '<thead><tr><th>field</th><th>old</th><th></th><th>new</th></tr></thead><tbody>' +
-      Object.keys(r.changes).map((f) => {
-        const c = isPlainObject(r.changes[f]) ? r.changes[f] : {};
-        return '<tr><td class="mono">' + esc(f) + "</td><td>" + valueHTML(c.old) +
-          '</td><td class="arrow">→</td><td>' + valueHTML(c.new) + "</td></tr>";
-      }).join("") + "</tbody></table></section>";
+      changeEntries(r).map(([f, c]) =>
+        '<tr><td class="mono">' + esc(f) + "</td><td>" + valueHTML(c.old) +
+        '</td><td class="arrow">→</td><td>' + valueHTML(c.new) + "</td></tr>").join("") + "</tbody></table></section>";
   }
   if (isPlainObject(r.error)) {
     h += '<section><b class="out-error">' + esc(r.error.type) + "</b>: " + esc(r.error.message) + "</section>";
@@ -1182,7 +1181,7 @@ const ROW_HEIGHT = 24;
 const DEFAULT_WIDTHS = [96, 200, 96, 64, 110, 150, 130, 400];
 
 // The fixed-height virtual list. rowSource(model, mode, collapsed) returns the row indices;
-// ticket 08 replaces it to filter. setWidths() is the hook for column resizing (ticket 10).
+// the filter bar replaces it to filter. setWidths() is the hook for column resizing.
 function createList(doc, wrap, m) {
   wrap.innerHTML = '<div class="lhead"><div class="grid">' +
     COLUMNS.map((c, k) => '<div class="hc" data-col="' + k + '">' + c + "</div>").join("") +
@@ -1242,7 +1241,7 @@ function createList(doc, wrap, m) {
 }
 
 // ---------------------------------------------------------------------------------------
-// DOM: details panel, column resizing, sticky Scopes, fold buttons (ticket 10)
+// DOM: details panel, column resizing, sticky Scopes, fold buttons
 // ---------------------------------------------------------------------------------------
 // installListTools(doc, app, report) wraps the list in .main next to an <aside class="panel">,
 // overlays .stick on the list, adds resize handles to the header cells and puts the fold
@@ -1269,7 +1268,7 @@ function installListTools(doc, app, report) {
   panel.className = "panel";
   panel.hidden = true;
   main.appendChild(panel);
-  // Fold buttons go in the filter bar's .fold-slot (ticket 08), else in their own #treetools.
+  // Fold buttons go in the filter bar's .fold-slot, else in their own #treetools.
   const btns = '<span class="treebtns">' +
     '<button type="button" data-foldall="none" title="Expand all Scopes">Expand all</button>' +
     '<button type="button" data-foldall="phases" title="Fold entity Scopes, keep phases open">Fold to phases</button>' +
@@ -1408,13 +1407,13 @@ function installListTools(doc, app, report) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Filter bar (ticket 08; browser only). Views with counts, search box, level ≥, Tree/Flat.
+// Filter bar (browser only). Views with counts, search box, level ≥, Tree/Flat.
 // ---------------------------------------------------------------------------------------
 // createFilterBar returns the filter API (window.dbfixlogReport.filter):
 //   get()          -> a copy of the state {view, q, level} (see filterRows)
 //   set(partial)   -> merges into the state, updates the controls and refreshes the list
 //   query(q)       -> shows exactly what q matches: view All, level DEBUG, search box q.
-//                     Notice links and summary-card numbers (ticket 09) use this.
+//                     Notice links and summary-card numbers use this.
 //   last           -> the latest filterRows result {rows, active, matches, shown, ms}
 // It installs itself as list.rowSource and sets list.shown for "k of n shown".
 
@@ -1442,7 +1441,7 @@ const SEARCH_HELP =
 
 function filterBarHTML(m) {
   const c = viewCounts(m);
-  const lv = Object.keys(LEVELS);
+  const levels = Object.keys(LEVELS);
   return '<div class="fbar">' +
     '<span class="seg views">' + VIEWS.map((v) =>
       '<button type="button" data-view="' + v + '" class="' + (v === "all" ? "on" : "") +
@@ -1452,12 +1451,12 @@ function filterBarHTML(m) {
     'placeholder="search… e.g. acme status:failed, key:156, f.city=gent">' +
     '<details class="qhelp"><summary title="search help">?</summary><div class="qhelp-body">' + SEARCH_HELP +
     "</div></details>" +
-    '<label class="lvl">level ≥ <select name="level">' + lv.map((l) =>
+    '<label class="lvl">level ≥ <select name="level">' + levels.map((l) =>
       '<option value="' + l + '">' + (l === "DEBUG" ? "all" : l.toLowerCase()) + "</option>").join("") +
     "</select></label>" +
     '<span class="seg modes"><button type="button" data-mode="tree" class="on">Tree</button>' +
     '<button type="button" data-mode="flat">Flat</button></span>' +
-    '<span class="fold-slot"></span>' + // fold buttons (ticket 10)
+    '<span class="fold-slot"></span>' + // fold buttons
     '<span class="fcount dim"></span></div>';
 }
 
@@ -1485,7 +1484,7 @@ function createFilterBar(doc, bar, list, m, listEl) {
     for (const b of bar.querySelectorAll("[data-view]")) b.classList.toggle("on", b.dataset.view === state.view);
     for (const b of bar.querySelectorAll("[data-mode]")) b.classList.toggle("on", b.dataset.mode === list.mode);
     const fold = bar.querySelector(".fold-slot");
-    if (fold) fold.hidden = list.mode !== "tree"; // fold buttons (ticket 10) only act in Tree mode
+    if (fold) fold.hidden = list.mode !== "tree"; // fold buttons only act in Tree mode
     select.value = state.level;
     const r = filter.last;
     count.textContent = r.active
@@ -1515,7 +1514,7 @@ function createFilterBar(doc, bar, list, m, listEl) {
     else if (e.key === "Escape") filter.set({ q: "" });
   });
   // Build the search index while idle, so the first keystroke doesn't pay for it.
-  // filter.indexMs records how long that took (for the budget test, ticket 11).
+  // filter.indexMs records how long that took (read by the budget test).
   const idle = doc.defaultView.requestIdleCallback || ((f) => setTimeout(f, 50));
   idle(() => {
     const t0 = performance.now();
@@ -1529,7 +1528,7 @@ function renderReport(doc, app, payload) {
   const m = buildModel(payload);
   app.innerHTML = '<div class="report">' + runHeaderHTML(m) +
     '<div class="notices">' + noticesHTML(m) + "</div>" +
-    '<div id="cards">' + cardsHTML(m) + '</div><div id="bar"></div>' + // filter bar slot (08)
+    '<div id="cards">' + cardsHTML(m) + '</div><div id="bar"></div>' + // filter bar slot
     '<div class="listwrap"></div></div>';
   const list = createList(doc, app.querySelector(".listwrap"), m);
   const filter = createFilterBar(doc, app.querySelector("#bar"), list, m, app.querySelector(".listwrap .list"));
@@ -1561,7 +1560,7 @@ async function startReport(doc) {
     root.dataset.recordCount = String(payload.records.length);
     const report = renderReport(doc, app, payload);
     const t2 = performance.now();
-    // Data ready (SPEC §7): decode + parse + model + first list render, in ms from the
+    // Data ready: decode + parse + model + first list render, in ms from the
     // start of this function; nav is the same moment measured from navigation start.
     report.timing = { decode: t1 - t0, render: t2 - t1, ready: t2 - t0, nav: t2 };
     root.dataset.readyMs = String(Math.round(t2 - t0));
@@ -1579,8 +1578,6 @@ if (typeof module !== "undefined") module.exports = {
   decodePayload, buildModel, modeStrip, runNotices, isEntry, isHeader, isRow, treeRows, flatRows,
   rowCells, rowClass, valueHTML, scopeName, hms, duration, esc, LEVELS, COLUMNS,
   parseQuery, compileFilter, matchRow, filterRows, viewCounts, VIEWS,
-  // ticket 10
   foldSet, stickyScopes, loadWidths, saveWidths, WIDTHS_KEY, DEFAULT_WIDTHS,
-  // ticket 09
   summaryCounts, cardsHTML,
 };

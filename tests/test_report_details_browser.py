@@ -1,4 +1,4 @@
-"""Headless Firefox checks for ticket 10: details panel, column resizing, horizontal
+"""Headless Firefox checks for the details panel, column resizing, horizontal
 scroll, sticky Scopes and the fold buttons.
 
 Reuses the Firefox lifecycle of test_report_browser (without re-running its tests).
@@ -124,7 +124,7 @@ class DetailsPanelInFirefox(unittest.TestCase):
           out.shown = !!row(2);
           out.selected = !!row(2) && row(2).classList.contains('sel');
           out.title = panel.querySelector('h3').textContent;
-          q('a[data-q]', panel)[0].click();  // "show only this Scope": filters to in:2 (ticket 08)
+          q('a[data-q]', panel)[0].click();  // "show only this Scope": filters to in:2
           out.afterQuery = !!row(2);
           out.query = R.filter.get().q;
           out.filtered = R.list.rows.slice();

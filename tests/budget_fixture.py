@@ -1,4 +1,4 @@
-"""Budget fixture generator (SPEC §7): a Log File with realistic entropy.
+"""Budget fixture generator: a Log File with realistic entropy.
 
 Written through dbfixlog.py itself, so generating it also exercises the writer end to end.
 It produces random ids, names and free text, mixed field counts, Scopes nested up to four
@@ -139,7 +139,7 @@ def generate(path, n, seed=0):
 def _write(path, n, seed, g):
     r = g.r
     with dbfixlog.run(path, mode="write", title="Budget fixture %d" % n, console=False,
-                      overwrite=True, description="Synthetic Log File for the SPEC §7 budgets",
+                      overwrite=True, description="Synthetic Log File for the load and search budgets",
                       target={"database": "shop_bench", "host": "db-%d" % seed},
                       fields={"seed": seed, "records": n}) as log:
         sync = dbfixlog.get_logger("shop.sync")

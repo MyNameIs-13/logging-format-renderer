@@ -196,7 +196,7 @@ class RunSetupTest(RunTestCase):
                           mode="dry", console=False):
             pass
 
-    def test_later_ticket_options_are_accepted(self):
+    def test_encoding_and_console_options_are_accepted(self):
         with dbfixlog.run(self.path, mode="dry", encoders={int: str},
                           strict=True, max_text=10, console=logging.WARNING):
             pass

@@ -87,7 +87,7 @@ td { padding: 1px 8px 1px 0; text-align: left; vertical-align: top; }
 .empty { font-size: 11px; color: #9aa3ad; font-style: italic; }
 .mark { font: 600 10px system-ui; color: #8a5a00; background: #fff1cc; border-radius: 3px; padding: 0 4px; }
 
-/* Ticket 10: list beside the details panel, sticky Scopes, resize handles, fold buttons. */
+/* List beside the details panel, sticky Scopes, resize handles, fold buttons. */
 .main { flex: 1; display: flex; min-height: 0; }
 .main .listwrap { min-width: 0; position: relative; }
 .vr { cursor: pointer; }
@@ -113,7 +113,7 @@ td { padding: 1px 8px 1px 0; text-align: left; vertical-align: top; }
 #treetools button { font: 12px system-ui; margin-right: 4px; }
 .fold-slot .treebtns { display: inline-flex; gap: 4px; }
 
-/* Filter bar (ticket 08): views with counts, search, level ≥, Tree/Flat. */
+/* Filter bar: views with counts, search, level ≥, Tree/Flat. */
 #bar:empty { display: none; }
 .fbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 14px; border-bottom: 1px solid var(--line); }
 .fbar button { font: 12px system-ui; padding: 3px 9px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
@@ -136,7 +136,7 @@ td { padding: 1px 8px 1px 0; text-align: left; vertical-align: top; }
 .qhelp-body code { font: 11.5px var(--mono); }
 .qhelp-body td { padding: 1px 12px 1px 0; }
 
-/* Summary cards (ticket 09): foldable, open by default; every non-zero number is a [data-q] link. */
+/* Summary cards: foldable, open by default; every non-zero number is a [data-q] link. */
 #cards:empty { display: none; }
 .cards { padding: 6px 14px 8px; border-bottom: 1px solid var(--line); }
 .cards > summary { cursor: pointer; font: 600 12px system-ui; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }

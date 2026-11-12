@@ -1,4 +1,4 @@
-"""SPEC §7 budgets: the realistic-entropy fixture and the 100k Report in Firefox.
+"""Load and search budgets: the realistic-entropy fixture and the 100k Report in Firefox.
 
 The fixture is written through dbfixlog.py itself (tests/budget_fixture.py), so these
 tests also run the writer end to end at volume.
@@ -91,7 +91,7 @@ class BudgetFixture(unittest.TestCase):
         self.assertEqual(strip(read_jsonl(other)), strip(self.records))
 
 
-# Waits for the Report and its idle-time search index (ticket 08), then times a set of
+# Waits for the Report and its idle-time search index, then times a set of
 # filters and searches through the real filter bar: filter.set() runs filterRows and
 # redraws the list synchronously; reading offsetHeight adds the forced layout.
 BUDGET_PROBE = """(() => {

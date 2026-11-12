@@ -1,4 +1,4 @@
-// Search, views and the Scope-header pruning rule (SPEC §6.3, §6.4).
+// Search, views and the Scope-header pruning rule.
 const test = require("node:test");
 const assert = require("node:assert");
 const path = require("node:path");

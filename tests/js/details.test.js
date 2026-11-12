@@ -1,4 +1,4 @@
-// Ticket 10: folding, sticky Scopes, remembered column widths (pure parts).
+// Folding, sticky Scopes, remembered column widths (pure parts).
 const test = require("node:test");
 const assert = require("node:assert");
 const path = require("node:path");

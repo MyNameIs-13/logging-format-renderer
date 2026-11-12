@@ -40,7 +40,7 @@ class ConsoleTestCase(unittest.TestCase):
 
 
 class ChangeAndFindingLineTest(ConsoleTestCase):
-    def test_change_in_scope_matches_spec_example(self):
+    def test_change_in_scope_is_prefixed_by_the_scope_label(self):
         with dbfixlog.run(self.path, mode="dry") as log:
             with log.scope("customer", key={"id": 42}, label={"name": "ACME"}):
                 log.change("orders", "delete", key={"id": 156})

@@ -29,7 +29,7 @@ test("decodePayload reads the payload the renderer embeds", async () => {
 });
 
 test("decodePayload reads a payload that inflates in many chunks", async () => {
-  // The decoder copies stream chunks into one buffer sized from the gzip trailer (ticket 11);
+  // The decoder copies stream chunks into one buffer sized from the gzip trailer;
   // multibyte characters straddle the chunk boundaries here.
   const zlib = require("node:zlib");
   const records = Array.from({ length: 20000 }, (_, i) => ({ i, msg: "ünï " + i }));

@@ -1,4 +1,4 @@
-"""Value encoding (SPEC 3.5), observed through the Log File."""
+"""Value encoding, observed through the Log File."""
 
 import datetime
 import decimal

@@ -1,4 +1,4 @@
-"""Headless Firefox checks for ticket 09: the summary cards, and that clicking a card
+"""Headless Firefox checks for the summary cards, and that clicking a card
 number filters the list.
 
 Reuses the Firefox lifecycle and probe helper of test_report_details_browser (without

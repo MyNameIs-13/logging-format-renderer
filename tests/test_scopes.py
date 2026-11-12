@@ -62,8 +62,8 @@ class ScopeTest(unittest.TestCase):
         self.assertNotIn("scope", end)
         self.assertNotIn("exc", end)
 
-    def test_nested_scopes_match_spec_example(self):
-        # SPEC 3.6: start/end carry the parent's path, inner records the full path.
+    def test_nested_scopes_carry_parent_and_full_paths(self):
+        # Start/end carry the parent's path, inner records the full path.
         with dbfixlog.run(self.path, mode="dry", console=False) as log:
             log.info("connected")
             with dbfixlog.scope("orphan-check", msg="pass 1"):
