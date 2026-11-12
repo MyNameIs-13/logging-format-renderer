@@ -186,6 +186,247 @@ function givenNotice(n) {
 // Time column and notices use UTC: the hh:mm:ss.mmm slice of ts.
 function hms(ts) { return typeof ts === "string" ? ts.slice(11, 23) : ""; }
 
+// ---------------------------------------------------------------------------------------
+// Row lists (pure). A row is a record index: a scope_start index is that Scope's header
+// row, any other index is an entry. Ticket 08 adds filtering and pruning on top of these.
+// ---------------------------------------------------------------------------------------
+
+function isHeader(m, i) {
+  const r = m.records[i];
+  if (r.type !== "scope_start") return false;
+  const s = m.scopes.get(r.id);
+  return !!s && s.start === i;
+}
+
+function isRow(m, i) { return isEntry(m.records[i]) || isHeader(m, i); }
+
+function anyIn(path, set) {
+  if (!set.size || !Array.isArray(path)) return false;
+  for (const id of path) if (set.has(id)) return true;
+  return false;
+}
+
+// Tree mode: Scope headers and entries in file order; a folded Scope keeps its header
+// but hides everything inside it. collapsed is a Set of Scope ids.
+function treeRows(m, collapsed) {
+  const out = [];
+  const recs = m.records;
+  for (let i = 0; i < recs.length; i++) {
+    if (!isRow(m, i)) continue;
+    if (anyIn(recs[i].scope, collapsed)) continue;
+    out.push(i);
+  }
+  return out;
+}
+
+// Flat mode: a plain list in which Scope header rows are ordinary rows.
+function flatRows(m) {
+  const out = [];
+  for (let i = 0; i < m.records.length; i++) if (isRow(m, i)) out.push(i);
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------
+// Cells (pure; return HTML strings)
+// ---------------------------------------------------------------------------------------
+
+const LEVELS = { DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50 };
+const COLUMNS = ["Time", "Scope", "Status", "Op", "Table", "Key", "Label", "Details"];
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function isPlainObject(v) { return v !== null && typeof v === "object" && !Array.isArray(v); }
+
+// Values are shown as logged. null and "" are distinct; $-marked values are markers.
+function valueHTML(v) {
+  if (v === null) return '<span class="null" title="NULL (the Uniface loader may not tell NULL from empty)">NULL</span>';
+  if (v === "") return '<span class="empty" title="empty string (the Uniface loader may not tell NULL from empty)">(empty)</span>';
+  if (isPlainObject(v)) {
+    if ("$truncated" in v) {
+      return esc(v.$truncated) + '… <span class="mark">truncated · ' + esc(v.length) + " chars</span>";
+    }
+    if ("$bytes" in v) {
+      return '<span class="mark">bytes · ' + esc(v.length) + '</span> <span class="mono dim">' + esc(v.$bytes) + "</span>";
+    }
+    if ("$unencodable" in v) return '<span class="mark">unencodable</span> ' + esc(v.$unencodable);
+  }
+  if (v !== null && typeof v === "object") return '<span class="mono">' + esc(JSON.stringify(v)) + "</span>";
+  return esc(v);
+}
+
+function pairsHTML(obj) {
+  if (!isPlainObject(obj)) return obj === undefined ? "" : valueHTML(obj);
+  return Object.keys(obj).map((k) => esc(k) + "=" + valueHTML(obj[k])).join(" ");
+}
+
+function keyHTML(k) { return '<span class="key">' + pairsHTML(k) + "</span>"; }
+
+function labelHTML(l) {
+  if (l === undefined) return "";
+  const vals = isPlainObject(l) ? Object.keys(l).map((k) => valueHTML(l[k])) : [valueHTML(l)];
+  return '<span class="lab">' + vals.join(" ") + "</span>";
+}
+
+function plainText(v) {
+  if (v === null) return "NULL";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+// A Scope's short name: kind plus its label values, else its key.
+function scopeName(m, id) {
+  const s = m.scopes.get(id);
+  if (!s) return "#" + id;
+  const r = m.records[s.start];
+  let extra = "";
+  if (isPlainObject(r.label)) extra = Object.keys(r.label).map((k) => plainText(r.label[k])).join(" ");
+  else if (isPlainObject(r.key)) extra = Object.keys(r.key).map((k) => k + "=" + plainText(r.key[k])).join(" ");
+  return r.kind + (extra ? " " + extra : "");
+}
+
+function duration(ms) {
+  if (typeof ms !== "number") return "";
+  if (ms < 1000) return ms + " ms";
+  if (ms < 60000) return (ms / 1000).toFixed(1) + " s";
+  return Math.floor(ms / 60000) + " min " + Math.round((ms % 60000) / 1000) + " s";
+}
+
+function badge(cls, text, title) {
+  return '<span class="b ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : "") + ">" + esc(text) + "</span>";
+}
+
+function levelBadge(level) {
+  const l = String(level || "");
+  return badge("lvb-" + (l in LEVELS ? l : "other"), l.toLowerCase());
+}
+
+function statusHTML(m, i) {
+  const r = m.records[i];
+  if (isHeader(m, i)) {
+    const o = m.scopes.get(r.id).outcome;
+    if (o === "error") return badge("st-scope-error", "scope error");
+    if (o === "unfinished") return badge("st-unfinished", "unfinished", "no scope_end record");
+    return "";
+  }
+  if (r.type === "scope_end") return badge("st-scope-error", "scope error");
+  if (r.type === "change") {
+    const w = m.warn[i];
+    if (w && m.mode === "dry") return badge("st-mismatch", r.status + " ⚠", w);
+    if (w) return badge("st-" + r.status + " st-warn", r.status + " ⚠", w);
+    return badge("st-" + r.status, r.status);
+  }
+  return levelBadge(r.level);
+}
+
+// Derived totals for a Scope header: records, planned/applied/failed, Findings, duration.
+function totalsHTML(m, s) {
+  const t = s.totals;
+  const parts = [plural(t.records, "record", "records")];
+  if (t.planned) parts.push(t.planned + " planned");
+  if (t.applied) parts.push('<span class="' + (m.mode === "dry" ? "out-error" : "out-ok") + '">' + t.applied + " applied</span>");
+  if (t.failed) parts.push('<span class="out-error">' + t.failed + " failed</span>");
+  if (t.findings) parts.push(plural(t.findings, "Finding", "Findings"));
+  if (t.duration_ms !== null) parts.push(duration(t.duration_ms));
+  return parts.join(" · ");
+}
+
+function detailsHTML(m, i) {
+  const r = m.records[i];
+  const msg = r.msg !== undefined ? ' <span class="msg">' + esc(r.msg) + "</span>" : "";
+  if (isHeader(m, i)) {
+    const s = m.scopes.get(r.id);
+    return (r.msg !== undefined ? esc(r.msg) + " · " : "") + '<span class="dim">' + totalsHTML(m, s) + "</span>";
+  }
+  switch (r.type) {
+    case "change": {
+      let h = "";
+      if (isPlainObject(r.changes)) {
+        h = Object.keys(r.changes).map((f) => {
+          const c = isPlainObject(r.changes[f]) ? r.changes[f] : {};
+          return '<span class="fld">' + esc(f) + ":</span> " + valueHTML(c.old) +
+            '<span class="arrow"> → </span>' + valueHTML(c.new);
+        }).join("  ");
+      }
+      if (isPlainObject(r.error)) {
+        h += (h ? " " : "") + '<span class="out-error">' + esc(r.error.type) + ": " + esc(r.error.message) + "</span>";
+      }
+      return h + (h ? msg : msg.slice(1));
+    }
+    case "finding":
+      return '<span class="chk">' + esc(r.check) + "</span>" + msg;
+    case "scope_end": {
+      const e = r.exc || {};
+      return '<span class="out-error">' + esc(scopeName(m, r.id)) + " raised " + esc(e.type || "") +
+        ": " + esc(e.message || "") + "</span>";
+    }
+    case "message":
+      return (r.msg !== undefined ? esc(r.msg) : "") + fieldsHTML(r.fields, r.msg !== undefined);
+    default: // unknown type: generic row
+      return '<span class="dim">' + esc(r.type) + ":</span>" + msg + fieldsHTML(r.fields, true);
+  }
+}
+
+function fieldsHTML(f, lead) {
+  if (!isPlainObject(f) || !Object.keys(f).length) return "";
+  return (lead ? " " : "") + '<span class="fld">' + pairsHTML(f) + "</span>";
+}
+
+function scopeCellHTML(m, i, mode, collapsed) {
+  const r = m.records[i];
+  const header = isHeader(m, i);
+  if (mode === "flat") {
+    const path = (Array.isArray(r.scope) ? r.scope : []).concat(header ? [r.id] : []);
+    const full = path.map((id) => scopeName(m, id)).join(" › ");
+    return '<span class="crumb" title="' + esc(full) + '">' + esc(full) + "</span>";
+  }
+  const depth = Array.isArray(r.scope) ? r.scope.length : 0;
+  let h = '<span class="sc">' + "<i></i>".repeat(depth);
+  if (header) {
+    const folded = collapsed && collapsed.has(r.id);
+    h += '<b class="caret" data-fold="' + esc(r.id) + '" title="' + (folded ? "expand" : "fold") + '">' +
+      (folded ? "▸" : "▾") + '</b><b class="kind" title="' + esc(scopeName(m, r.id)) + '">' + esc(r.kind) + "</b>";
+  }
+  return h + "</span>";
+}
+
+// The eight column cells (see COLUMNS) of row i, as HTML strings.
+function rowCells(m, i, mode, collapsed) {
+  const r = m.records[i];
+  const header = isHeader(m, i);
+  let key = "";
+  if (header) key = r.key !== undefined ? keyHTML(r.key) : '<span class="dim">phase</span>';
+  else if (r.key !== undefined) key = keyHTML(r.key);
+  else if (r.type === "change") key = '<span class="dim">(new)</span>';
+  return [
+    '<span class="t">' + esc(hms(r.ts)) + "</span>",
+    scopeCellHTML(m, i, mode, collapsed),
+    statusHTML(m, i),
+    !header && r.op !== undefined ? '<span class="op op-' + esc(r.op) + '">' + esc(r.op) + "</span>" : "",
+    !header && r.table !== undefined ? '<span class="tbl">' + esc(r.table) + "</span>" : "",
+    key,
+    labelHTML(r.label),
+    detailsHTML(m, i),
+  ];
+}
+
+// CSS classes for row i: sh (Scope header), err (raised), dbg (DEBUG, dimmed), warn (is:warn).
+function rowClass(m, i) {
+  const r = m.records[i];
+  const c = [];
+  if (isHeader(m, i)) {
+    c.push("sh");
+    const o = m.scopes.get(r.id).outcome;
+    if (o !== "ok") c.push(o === "error" ? "err" : "unf");
+  } else {
+    if (r.level === "DEBUG") c.push("dbg");
+    if (m.warn[i]) c.push("warn");
+    if (r.type === "scope_end") c.push("err");
+  }
+  return c.join(" ");
+}
+
 // An entry is a record shown as an ordinary list row: everything except the Run Header,
 // run_end, Scope starts (shown as Scope header rows) and Scope ends that closed "ok".
 // Unknown record types are entries and render as generic rows.
@@ -214,4 +455,7 @@ async function startReport(doc) {
 }
 
 if (typeof document !== "undefined") startReport(document);
-if (typeof module !== "undefined") module.exports = { decodePayload, buildModel, modeStrip, runNotices };
+if (typeof module !== "undefined") module.exports = {
+  decodePayload, buildModel, modeStrip, runNotices, isEntry, isHeader, isRow, treeRows, flatRows,
+  rowCells, rowClass, valueHTML, scopeName, hms, duration, esc, LEVELS, COLUMNS,
+};

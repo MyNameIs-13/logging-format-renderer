@@ -135,3 +135,90 @@ test("notices: planned in a Write Run, unfinished Run and Scopes, outcome, rende
   assert.deepStrictEqual(ns.map((n) => n.kind), ["run_outcome", "newer_minor", "something_new"]);
   assert.strictEqual(ns[2].text, "shown as is");
 });
+
+test("Tree rows: Scope headers then their entries, in file order; a folded Scope hides its contents", () => {
+  const m = R.buildModel(nested("dry"));
+  // 1, 2 are Scope headers (scope_start records); ok scope_ends and run_start/run_end are not rows.
+  assert.deepStrictEqual(R.treeRows(m, new Set()), [1, 2, 3, 4, 5, 7, 9]);
+  assert.deepStrictEqual(R.treeRows(m, new Set([2])), [1, 2, 7, 9]);
+  assert.deepStrictEqual(R.treeRows(m, new Set([1])), [1, 9]);
+  assert.deepStrictEqual(R.flatRows(m), [1, 2, 3, 4, 5, 7, 9]);
+});
+
+const text = (html) => html.replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+const COLS = ["Time", "Scope", "Status", "Op", "Table", "Key", "Label", "Details"];
+function cells(m, i, mode) {
+  const c = R.rowCells(m, i, mode || "tree", new Set());
+  const o = {};
+  COLS.forEach((n, k) => { o[n] = text(c[k]); });
+  return o;
+}
+
+test("columns for a Change, a Scope header and a raising Scope", () => {
+  const m = R.buildModel(nested("dry", "applied"));
+  const ch = cells(m, 4);
+  assert.strictEqual(ch.Time, "20:01:00.000");
+  assert.match(ch.Status, /applied ⚠/);
+  assert.strictEqual(ch.Op, "delete");
+  assert.strictEqual(ch.Table, "orders");
+  assert.strictEqual(ch.Key, "id=156");
+  const upd = cells(m, 5);
+  assert.strictEqual(upd.Details, "note: NULL → x");
+
+  const hdr = cells(m, 2);
+  assert.match(hdr.Scope, /customer/);
+  assert.strictEqual(hdr.Status, "");
+  assert.strictEqual(hdr.Key, "id=42");
+  assert.strictEqual(hdr.Label, "ACME");
+  assert.match(hdr.Details, /3 records · 1 planned · 1 applied · 1 Finding · 40 ms/);
+  assert.match(cells(m, 1).Key, /^phase$/);
+  assert.match(cells(m, 1).Details, /^pass 1 · /);
+
+  assert.strictEqual(cells(m, 3).Status, "warning");
+  assert.match(cells(m, 3).Details, /no-lines/);
+
+  // Flat mode shows the Scope path instead of guide lines.
+  assert.strictEqual(cells(m, 4, "flat").Scope, "orphan-check › customer ACME");
+});
+
+test("a Scope that raised shows scope error; an unfinished one says so", () => {
+  const p = nested("dry");
+  p.records[6] = rec("scope_end", { id: 2, outcome: "error", duration_ms: 40, scope: [1], level: "ERROR",
+    exc: { type: "ValueError", message: "bad", traceback: "tb" } });
+  const m = R.buildModel(p);
+  assert.strictEqual(cells(m, 2).Status, "scope error");
+  assert.strictEqual(cells(m, 6).Status, "scope error");
+  assert.match(cells(m, 6).Details, /ValueError: bad/);
+  assert.deepStrictEqual(R.treeRows(m, new Set()), [1, 2, 3, 4, 5, 6, 7, 9]);
+
+  const crashed = R.buildModel(payload(nested("dry").records.slice(0, 6)));
+  assert.strictEqual(cells(crashed, 2).Status, "unfinished");
+});
+
+test("an unknown record type is a generic row", () => {
+  const p = nested("dry");
+  p.records.splice(9, 0, rec("heartbeat", { level: "DEBUG", msg: "tick", fields: { n: 1 }, scope: [1] }));
+  const m = R.buildModel(p);
+  assert.ok(R.treeRows(m, new Set()).includes(9));
+  assert.strictEqual(m.scopes.get(1).totals.records, 5);
+  const c = cells(m, 9);
+  assert.strictEqual(c.Status, "debug");
+  assert.strictEqual(c.Details, "heartbeat: tick n=1");
+  assert.match(R.rowClass(m, 9), /\bdbg\b/);
+});
+
+test("value display: NULL, (empty), $ markers, values as logged", () => {
+  assert.match(R.valueHTML(null), /class="null"[^>]*>NULL</);
+  assert.match(R.valueHTML(""), /class="empty"[^>]*>\(empty\)</);
+  assert.strictEqual(R.valueHTML("20261122053550"), "20261122053550");
+  assert.strictEqual(R.valueHTML("<b>"), "&lt;b&gt;");
+  assert.strictEqual(R.valueHTML(12.5), "12.5");
+  assert.strictEqual(R.valueHTML(false), "false");
+  const tr = R.valueHTML({ $truncated: "abc", length: 5000 });
+  assert.match(tr, /abc/);
+  assert.match(tr, /class="mark"[^>]*>truncated · 5000 chars</);
+  assert.match(R.valueHTML({ $bytes: "deadbeef", length: 4 }), /class="mark"[^>]*>bytes · 4</);
+  assert.match(R.valueHTML({ $unencodable: "<Foo>" }), /class="mark"[^>]*>unencodable<.*&lt;Foo&gt;/);
+  assert.strictEqual(text(R.valueHTML({ a: [1, null] })), '{"a":[1,null]}');
+});
