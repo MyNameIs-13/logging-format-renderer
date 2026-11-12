@@ -1,0 +1,75 @@
+"""Render CLI (dbfixlog_render.py), tested through the command line and the embedded payload."""
+import base64
+import gzip
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT = os.path.join(ROOT, "dbfixlog_render.py")
+FIXTURE = os.path.join(ROOT, "tests", "fixtures", "basic.jsonl")
+
+PAYLOAD_RE = re.compile(
+    r'<script type="application/json" id="dbfixlog-payload">([^<]*)</script>')
+
+
+def fixture_lines():
+    with open(FIXTURE, encoding="utf-8") as f:
+        return f.read().splitlines()
+
+
+def decode_payload(html):
+    m = PAYLOAD_RE.search(html)
+    if m is None:
+        raise AssertionError("no payload block in Report")
+    return json.loads(gzip.decompress(base64.b64decode(m.group(1))).decode("utf-8"))
+
+
+class RenderCase(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir)
+
+    def write_log(self, text, name="run.jsonl"):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as f:
+            f.write(text.encode("utf-8") if isinstance(text, str) else text)
+        return path
+
+    def log_from(self, lines, name="run.jsonl", trailing_newline=True):
+        text = "\n".join(lines) + ("\n" if trailing_newline else "")
+        return self.write_log(text, name)
+
+    def render(self, *args):
+        proc = subprocess.run(
+            [sys.executable, SCRIPT] + list(args),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir)
+        return proc.returncode, proc.stdout.decode("utf-8"), proc.stderr.decode("utf-8")
+
+    def report(self, path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+
+class DefaultRender(RenderCase):
+    def test_writes_report_next_to_log_file_with_all_records_and_line_numbers(self):
+        log = self.log_from(fixture_lines())
+        code, out, err = self.render(log)
+        self.assertEqual(code, 0, err)
+        payload = decode_payload(self.report(os.path.join(self.dir, "run.html")))
+        self.assertEqual(len(payload["records"]), 10)
+        self.assertEqual(payload["lines"], list(range(1, 11)))
+        self.assertEqual(payload["records"][4]["check"], "order-without-lines")
+        self.assertEqual(payload["records"][6]["changes"]["note"]["new"],
+                         "cleaned <b>&amp;</b> </script> ünïcode")
+        self.assertEqual(payload["notices"], [])
+        self.assertFalse(payload["unfinished"])
+
+
+if __name__ == "__main__":
+    unittest.main()
