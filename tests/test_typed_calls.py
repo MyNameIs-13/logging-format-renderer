@@ -191,5 +191,128 @@ class ChangeMisuseTest(TypedCallTestCase):
         self.assertEqual([r["type"] for r in self.body()], ["change"] * 4)
 
 
+class FindingTest(TypedCallTestCase):
+    def test_finding_defaults_to_warning(self):
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            log.finding("orphan-order", "no customer",  # MARK-finding
+                        table="orders", key={"id": 156},
+                        label={"no": "A88f"}, fields={"customer_id": 9})
+        [f] = self.body()
+        self.assertEqual(f["type"], "finding")
+        self.assertEqual(f["level"], "WARNING")
+        self.assertEqual(f["logger"], "__main__")
+        self.assertEqual(f["src"], "%s:%d" % (THIS_FILE, lineno_of("MARK-finding")))
+        self.assertEqual(f["check"], "orphan-order")
+        self.assertEqual(f["msg"], "no customer")
+        self.assertEqual(f["table"], "orders")
+        self.assertEqual(f["key"], {"id": 156})
+        self.assertEqual(f["label"], {"no": "A88f"})
+        self.assertEqual(f["fields"], {"customer_id": 9})
+
+    def test_table_level_finding_with_level_override(self):
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            log.finding("dup-index", table="orders", level=logging.ERROR)
+            log.finding("stats-stale", level=logging.INFO)
+        a, b = self.body()
+        self.assertEqual(a["level"], "ERROR")
+        self.assertEqual(b["level"], "INFO")
+        for absent in ("msg", "key", "label", "fields"):
+            self.assertNotIn(absent, a)
+        self.assertNotIn("table", b)
+
+    def test_check_is_required(self):
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            with self.assertRaises(TypeError):
+                log.finding()
+            with self.assertRaises(TypeError):
+                log.finding(msg="no check", table="orders")
+
+    def test_finding_respects_configured_level(self):
+        with dbfixlog.run(self.path, mode="dry", console=False,
+                          level=logging.ERROR) as log:
+            log.finding("x")
+        self.assertEqual(self.body(), [])
+
+
+class LogScopeTest(TypedCallTestCase):
+    def test_log_scope_stamps_caller_src_and_logger(self):
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            helper = dbfixlog.get_logger("shop.fixes")
+            with log.scope("customer", key={"id": 42},  # MARK-log-scope
+                           label={"name": "ACME"}):
+                with helper.scope("phase"):  # MARK-helper-scope
+                    log.change("orders", "delete", key={"id": 156})
+        outer, inner, change, inner_end, outer_end = self.body()
+        self.assertEqual(outer["type"], "scope_start")
+        self.assertEqual(outer["logger"], "__main__")
+        self.assertEqual(outer["src"],
+                         "%s:%d" % (THIS_FILE, lineno_of("MARK-log-scope")))
+        self.assertEqual(outer["key"], {"id": 42})
+        self.assertEqual(outer["label"], {"name": "ACME"})
+        self.assertEqual(inner["logger"], "shop.fixes")
+        self.assertEqual(inner["src"],
+                         "%s:%d" % (THIS_FILE, lineno_of("MARK-helper-scope")))
+        self.assertEqual(inner["scope"], [1])
+        self.assertEqual(change["scope"], [1, 2])
+        self.assertEqual(outer_end["outcome"], "ok")
+
+    def test_log_scope_as_decorator(self):
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            @log.scope("orphan-check")
+            def check():
+                log.finding("orphan-order", key={"id": 1})
+            check()
+            check()
+        recs = self.body()
+        self.assertEqual([r["type"] for r in recs],
+                         ["scope_start", "finding", "scope_end"] * 2)
+        self.assertEqual(recs[1]["scope"], [1])
+        self.assertEqual(recs[4]["scope"], [2])
+
+
+HELPER_SOURCE = '''\
+import dbfixlog
+
+log = dbfixlog.get_logger(__name__)
+
+
+def fix(order_id):
+    log.info("fixing", fields={"id": order_id})
+    log.finding("orphan-order", key={"id": order_id})
+    log.change("orders", "delete", key={"id": order_id})
+    return log.dry_run
+'''
+
+
+class GetLoggerTest(TypedCallTestCase):
+    def import_helper(self):
+        with open(os.path.join(self.dir, "fixhelper.py"), "w") as f:
+            f.write(HELPER_SOURCE)
+        sys.path.insert(0, self.dir)
+        self.addCleanup(sys.path.remove, self.dir)
+        self.addCleanup(sys.modules.pop, "fixhelper", None)
+        import fixhelper
+        return fixhelper
+
+    def test_helper_module_logs_into_active_run(self):
+        # The helper's logger is created at import time, before the Run.
+        helper = self.import_helper()
+        with dbfixlog.run(self.path, mode="dry", console=False):
+            dry = helper.fix(156)
+        self.assertTrue(dry)
+        msg, finding, change = self.body()
+        for rec, line in ((msg, 7), (finding, 8), (change, 9)):
+            self.assertEqual(rec["logger"], "fixhelper")
+            self.assertEqual(rec["src"], "fixhelper.py:%d" % line)
+        self.assertEqual(msg["fields"], {"id": 156})
+        self.assertEqual(finding["type"], "finding")
+        self.assertEqual(change["status"], "planned")
+
+    def test_get_logger_returns_adapter_for_named_logger(self):
+        log = dbfixlog.get_logger("shop.fixes")
+        self.assertIsInstance(log, logging.LoggerAdapter)
+        self.assertIs(log.logger, logging.getLogger("shop.fixes"))
+
+
 if __name__ == "__main__":
     unittest.main()

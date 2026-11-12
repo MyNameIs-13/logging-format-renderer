@@ -325,6 +325,22 @@ class RunLogger(logging.LoggerAdapter):
             self._typed(logging.WARNING, "invalid change call: " + problem,
                         {}, src)
 
+    def finding(self, check, msg=None, *, table=None, key=None, label=None,
+                level=logging.WARNING, fields=None):
+        """Log a Finding: ``check`` is the stable rule name (SPEC 3.3, 4.3)."""
+        data = {"type": "finding", "msg": msg, "check": check}
+        for k, v in (("table", table), ("key", key), ("label", label),
+                     ("fields", fields)):
+            if v is not None:
+                data[k] = v
+        text = check if msg is None else "%s: %s" % (check, msg)
+        self._typed(level, text, data, _caller(1)[0])
+
+    def scope(self, kind, *, key=None, label=None, msg=None, fields=None):
+        """Open a Scope stamped with this logger's name (SPEC 3.4, 4.3)."""
+        return _Scope(kind, key, label, msg, fields, _caller(1)[0],
+                      self.logger.name)
+
     def _typed(self, level, text, data, src):
         # Typed methods live in this file, so findCaller would stamp
         # dbfixlog.py: the caller's src is passed through ATTR instead.
@@ -340,6 +356,15 @@ class RunLogger(logging.LoggerAdapter):
     def write_run(self):
         run = _active_run()
         return run is not None and run.mode == "write"
+
+
+def get_logger(name):
+    """The adapter for helper modules: ``log = dbfixlog.get_logger(__name__)``.
+
+    It finds the active Run at call time, so it may be created at import
+    time, before any Run is open.
+    """
+    return RunLogger(logging.getLogger(name))
 
 
 # --------------------------------------------------------------------------
