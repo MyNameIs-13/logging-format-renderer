@@ -11,9 +11,13 @@ import html
 import io
 import json
 import os
+import pathlib
 import sys
+import webbrowser
 
 __version__ = "0.1.0"
+# Format majors this renderer reads, each mapped to the newest minor it knows.
+KNOWN_MINORS = {1: 0}
 # Shape version of the payload embedded in the Report (documented at the top of report.js).
 PAYLOAD_VERSION = 1
 
@@ -108,8 +112,13 @@ def _gzip_b64(data):
 
 
 def _read_asset(name):
-    with open(os.path.join(HERE, name), encoding="utf-8") as f:
-        return f.read()
+    path = os.path.join(HERE, name)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except (IOError, OSError) as e:
+        raise Fatal(1, "cannot read {} (it must sit next to dbfixlog_render.py): {}".format(
+            path, e.strerror or e))
 
 
 def build_html(payload, title):
@@ -130,25 +139,92 @@ def build_html(payload, title):
     )
 
 
+EPILOG = """\
+exit codes:
+  0  Report written (also for unfinished Runs, skipped lines and newer-minor notices)
+  1  Log File unreadable, or its first line isn't a run_start (not a Log File);
+     also when the Report or report.js/report.css can't be read or written
+  2  usage error
+  3  unknown major format: update dbfixlog_render.py
+  4  --strict and malformed lines found
+
+Every fatal error is one stderr line prefixed "dbfixlog_render:". The success
+summary line (record count and Report size) also goes to stderr.
+"""
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        usage = " ".join(self.format_usage().split()[1:])  # one line, without "usage:"
+        raise Fatal(2, "{} (usage: {})".format(message, usage))
+
+
+def _parser():
+    parser = _Parser(
+        prog="dbfixlog_render.py",
+        description="Render a Log File into a self-contained HTML Report "
+                    "(renderer {}, reads format major {}).".format(
+                        __version__, ", ".join(str(m) for m in sorted(KNOWN_MINORS))),
+        epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("log", metavar="LOG", help="the Log File (JSON Lines)")
+    parser.add_argument("-o", dest="output", metavar="PATH|-",
+                        help="output path, or - for stdout "
+                             "(default: LOG's stem with .html, next to LOG; overwritten)")
+    parser.add_argument("--title", metavar="TEXT",
+                        help="Report title (default: run_start.title, then LOG's name)")
+    parser.add_argument("--open", action="store_true",
+                        help="open the Report in the default browser")
+    parser.add_argument("--strict", action="store_true",
+                        help="abort (exit 4) instead of skipping malformed lines")
+    parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
+    return parser
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog=PROG)
-    parser.add_argument("log")
-    parser.add_argument("-o", dest="output", metavar="PATH|-")
-    parser.add_argument("--title", metavar="TEXT")
-    parser.add_argument("--strict", action="store_true")
-    args = parser.parse_args(argv)
     try:
+        args = _parser().parse_args(argv)
         return _render(args)
     except Fatal as e:
         sys.stderr.write("{}: {}\n".format(PROG, e))
         return e.code
 
 
+def _check_format(header, log):
+    fmt = header.get("format")
+    parts = fmt.split(".") if isinstance(fmt, str) else []
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        raise Fatal(1, "{}: run_start has no valid format (got {}), not a Log File".format(
+            log, json.dumps(fmt)))
+    major, minor = int(parts[0]), int(parts[1])
+    if major not in KNOWN_MINORS:
+        raise Fatal(3, "{}: format {} is not supported; this renderer reads format major {}; "
+                       "update dbfixlog_render.py".format(
+                           log, fmt, ", ".join(str(m) for m in sorted(KNOWN_MINORS))))
+    known = "{}.{}".format(major, KNOWN_MINORS[major])
+    if minor > KNOWN_MINORS[major]:
+        return {"kind": "newer_minor", "format": fmt, "reads": known,
+                "message": "Log File format {} is newer than {}, which this renderer knows; "
+                           "newer fields may not be shown".format(fmt, known)}
+    return None
+
+
+def _read_log(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except (IOError, OSError) as e:
+        raise Fatal(1, "cannot read {}: {}".format(path, e.strerror or e))
+
+
 def _render(args):
-    with open(args.log, "rb") as f:
-        raw = f.read()
+    raw = _read_log(args.log)
     records, lines, bad, incomplete = _load_records(raw)
+    if not records or lines[0] != 1 or records[0].get("type") != "run_start":
+        raise Fatal(1, "{}: first line is not a run_start, not a Log File".format(args.log))
     notices = []
+    newer = _check_format(records[0], args.log)
+    if newer:
+        notices.append(newer)
     if bad:
         if args.strict:
             raise Fatal(4, "{}: {} malformed line{} (line {}); not rendering under --strict".format(
@@ -178,10 +254,15 @@ def _render(args):
         where = "stdout"
     else:
         where = args.output or os.path.splitext(args.log)[0] + ".html"
-        with open(where, "wb") as f:
-            f.write(report)
+        try:
+            with open(where, "wb") as f:
+                f.write(report)
+        except (IOError, OSError) as e:
+            raise Fatal(1, "cannot write {}: {}".format(where, e.strerror or e))
     sys.stderr.write("{}: wrote {} records to {} ({:,} bytes)\n".format(
         PROG, len(records), where, len(report)))
+    if args.open and where != "stdout":
+        webbrowser.open(pathlib.Path(os.path.abspath(where)).as_uri())
     return 0
 
 

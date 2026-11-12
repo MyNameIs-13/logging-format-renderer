@@ -45,10 +45,10 @@ class RenderCase(unittest.TestCase):
         text = "\n".join(lines) + ("\n" if trailing_newline else "")
         return self.write_log(text, name)
 
-    def render(self, *args):
+    def render(self, *args, env=None):
         proc = subprocess.run(
             [sys.executable, SCRIPT] + list(args),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir, env=env)
         return proc.returncode, proc.stdout.decode("utf-8"), proc.stderr.decode("utf-8")
 
     def report(self, path):
@@ -217,6 +217,126 @@ class InputHandling(RenderCase):
         lines.insert(1, '{"ts":"2026-11-12T20:01:00.100Z","level":"INFO","logger":"x","type":"metric","src":"a.py:1"}')
         payload, _ = self.render_payload(self.log_from(lines))
         self.assertEqual(payload["records"][1]["type"], "metric")
+
+
+def with_format(lines, fmt):
+    header = json.loads(lines[0])
+    if fmt is None:
+        del header["format"]
+    else:
+        header["format"] = fmt
+    return [json.dumps(header)] + lines[1:]
+
+
+class FormatVersion(RenderCase):
+    def test_unknown_major_exits_3_naming_formats_and_update_advice(self):
+        log = self.log_from(with_format(fixture_lines(), "2.0"))
+        code, out, err = self.render(log)
+        self.assertEqual(code, 3)
+        self.assert_one_error_line(err)
+        self.assertIn("2.0", err)
+        self.assertIn("reads format major 1", err)
+        self.assertIn("update dbfixlog_render.py", err)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "run.html")))
+
+    def test_newer_minor_renders_with_notice(self):
+        log = self.log_from(with_format(fixture_lines(), "1.7"))
+        code, out, err = self.render(log, "-o", "-")
+        self.assertEqual(code, 0, err)
+        notices = decode_payload(out)["notices"]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["kind"], "newer_minor")
+        self.assertEqual(notices[0]["format"], "1.7")
+        self.assertEqual(notices[0]["reads"], "1.0")
+        self.assertIn("1.7", notices[0]["message"])
+
+    def test_known_minor_has_no_notice(self):
+        code, out, err = self.render(self.log_from(fixture_lines()), "-o", "-")
+        self.assertEqual(decode_payload(out)["notices"], [])
+
+    def test_missing_or_garbled_format_is_not_a_log_file(self):
+        for fmt in (None, "one", 1, "1"):
+            with self.subTest(fmt=fmt):
+                code, _, err = self.render(self.log_from(with_format(fixture_lines(), fmt)))
+                self.assertEqual(code, 1, err)
+                self.assert_one_error_line(err)
+
+    def assert_one_error_line(self, err):
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertTrue(err.startswith("dbfixlog_render: "), err)
+
+
+class FatalErrors(RenderCase):
+    def assert_fatal(self, code, args, needle):
+        got, out, err = self.render(*args)
+        self.assertEqual(got, code, err)
+        self.assertEqual(out, "")
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertTrue(err.startswith("dbfixlog_render: "), err)
+        self.assertIn(needle, err)
+        return err
+
+    def test_missing_log_file_exits_1(self):
+        self.assert_fatal(1, [os.path.join(self.dir, "nope.jsonl")], "nope.jsonl")
+
+    def test_directory_as_log_file_exits_1(self):
+        self.assert_fatal(1, [self.dir], self.dir)
+
+    def test_empty_file_exits_1(self):
+        self.assert_fatal(1, [self.write_log("")], "not a Log File")
+
+    def test_first_line_not_run_start_exits_1(self):
+        self.assert_fatal(1, [self.log_from(fixture_lines()[1:])], "not a Log File")
+
+    def test_first_line_malformed_exits_1_even_without_strict(self):
+        self.assert_fatal(1, [self.log_from(["garbage"] + fixture_lines())], "not a Log File")
+
+    def test_unwritable_output_exits_1(self):
+        log = self.log_from(fixture_lines())
+        self.assert_fatal(1, [log, "-o", os.path.join(self.dir, "no", "such", "dir.html")],
+                          "dir.html")
+
+    def test_usage_errors_exit_2_with_one_line(self):
+        self.assert_fatal(2, [], "usage")
+        self.assert_fatal(2, ["a.jsonl", "--bogus"], "--bogus")
+        self.assert_fatal(2, ["a.jsonl", "-o"], "-o")
+
+    def test_help_documents_exit_codes(self):
+        code, out, err = self.render("--help")
+        self.assertEqual(code, 0)
+        for n in range(5):
+            self.assertRegex(out, r"(?m)^\s+%d\s" % n)
+        for flag in ("-o", "--title", "--open", "--strict"):
+            self.assertIn(flag, out)
+
+
+class OpenFlag(RenderCase):
+    def browser_env(self):
+        recorder = os.path.join(self.dir, "recorder.py")
+        self.opened = os.path.join(self.dir, "opened.txt")
+        with open(recorder, "w") as f:
+            f.write("import sys\nopen(%r, 'a').write(sys.argv[1] + '\\n')\n" % self.opened)
+        env = dict(os.environ)
+        env["BROWSER"] = "{} {} %s".format(sys.executable, recorder)
+        return env
+
+    def opened_urls(self):
+        if not os.path.exists(self.opened):
+            return []
+        with open(self.opened) as f:
+            return f.read().split()
+
+    def test_open_opens_the_written_report_as_file_url(self):
+        log = self.log_from(fixture_lines())
+        code, _, err = self.render(log, "--open", env=self.browser_env())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.opened_urls(),
+                         ["file://" + os.path.join(self.dir, "run.html")])
+
+    def test_report_is_not_opened_without_flag(self):
+        code, _, err = self.render(self.log_from(fixture_lines()), env=self.browser_env())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.opened_urls(), [])
 
 
 class OutputPath(RenderCase):
