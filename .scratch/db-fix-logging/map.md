@@ -17,7 +17,7 @@ A spec, ready to hand off for building, for (1) a Python stdlib-`logging`-based 
   - Connected-table work is grouped by Scope around a root entity (e.g. `with scope("customer", 42):`); Scopes nest.
   - Scripts log explicitly (`log.change(...)`, etc.); database-agnostic.
   - Search in the Report: free text, plus filters by level, logger, time, record type, table, key, and structured fields.
-  - Shipped as one small installable package (logging helper + `render` CLI) so format and parser version together.
+  - Shipped as plain files copied together from this repo (logging module + render script) so format and parser version together; see Package layout & render CLI.
   - Keeping sensitive values out of logs is the developer's responsibility.
 - Tracker: local markdown in `.scratch/db-fix-logging/` (see `issues/`). No git remote: research branches are local only.
 
@@ -32,12 +32,12 @@ A spec, ready to hand off for building, for (1) a Python stdlib-`logging`-based 
 - [Report layout](issues/07-report-layout.md): prototype variant E: run summary (foldable cards) over one list with sticky, resizable columns (Time, Scope tree, Status = Change status or level, Op, Table, Key, Label, Details), sticky Scopes, All/Changes/Findings/Errors views, one query-syntax search that also matches enclosing Scopes, details panel on demand; red strip for a Dry Run that logged applied/failed Changes; budgets hold at 100k (2.9 MB, ~350 ms, ≤ 25 ms)
 - [Logger API ergonomics](issues/08-logger-api.md): `with run(path, mode=...) as log:` writes run_start/run_end; handler on root logger so stdlib calls become Messages, `get_logger()` adapters add `change`/`finding`/`scope`; Change status defaults from mode (`error=` → failed); the script does and guards its own writes, "applied" = executed (commit not tracked); config as `run()` kwargs, console on at INFO to stderr
 - [Scope headers under filters](issues/09-scope-headers-under-filters.md): one rule for every filter (view, search, level, summary click): show a Scope header only if it matches itself or contains a visible row, and keep enclosing Scopes; totals cover the whole Scope plus "k of n shown"; Flat mode treats Scope rows as ordinary rows; unfinished Scopes are not errors (`is:unfinished`)
+- [Package layout & render CLI](issues/10-package-and-cli.md): no pip package: `dbfixlog.py` + standalone `dbfixlog_render.py` (+ `report.js`/`report.css`) copied together; Python 3.6.3+, stdlib only (`threading.local` for Scopes); `python dbfixlog_render.py LOG [-o] [--title] [--open] [--strict]`, `.html` beside the log, lenient on bad lines, exit codes 0/1/2/3/4
+- [Report size budget](issues/11-report-size-budget.md): no file-size budget (size follows the data; expected 3–7 MB at 100k, information only); budgets are ≤ 0.5 s data ready and ≤ 50 ms search at 100k, checked on a realistic-entropy fixture; record schema unchanged, no runtime size check, no record cap
 
 ## Not yet specified
 
-- **Dry Run vs Write Run comparison**: whether/how a Report can relate a Write Run to the Dry Run that preceded it (did everything planned get applied?). There is no run identity (see Run Header contents), so matching would go by Changes alone, by `table` + `key`/`label` + `op` (see Record schema).
-- **Rich content in records**: tables, links, code/SQL blocks beyond text and key/value fields. Report layout surfaced no need for it (Details column plus details panel covered every record); revisit only if real scripts miss it.
-- **Size budget with real data**: the 100k prototype was 2.9 MB, but its synthetic values compress ~9.5x. Real Log Files at 4–6x would be 5–7 MB, over the 5 MB budget (see Report layout). Needs a measurement on realistic or real data once a script exists, then either raise the budget or slim the records.
+<!-- empty: the remaining fog was ticketed (Report size budget) or ruled out of scope -->
 
 ## Out of scope
 
@@ -45,3 +45,6 @@ A spec, ready to hand off for building, for (1) a Python stdlib-`logging`-based 
 - Generating rollback scripts from a Write Run's Log File (old values are recorded, so this stays possible later).
 - Automatic capture at the database/driver layer (SQLAlchemy hooks, statement interception).
 - Redaction/masking of sensitive values: the developer's responsibility.
+- Dry Run vs Write Run comparison (did everything planned get applied?): it relates two Runs, against one Run → one Log File → one Report. Matching by `table` + `key` + `op` stays possible later.
+- Rich content in records (tables, links, SQL blocks): Report layout found no need; a fresh effort if real scripts miss it.
+- lnav format file for a terminal view of Log Files: a nice-to-have deferred by Package layout & render CLI.

@@ -71,6 +71,6 @@ log.change("orders", "delete", key={"id": 156}, label={"no": "A88f"})
 - On by default at INFO, writing to stderr. Set `console=logging.WARNING` to raise its level, or `console=False` to turn it off. No colours, no dependencies.
 - One terse line per record, prefixed by the Scope label: `20:01:03 INFO  customer 42 ACME › delete orders {id:156} planned`. Scope starts get a line; Scope ends get one only on `error`. Messages use the stdlib format.
 
-**Concurrency:** one Run per process with a single writer (03-record-schema.md). Scope state lives in a ContextVar, so threads keep separate Scope paths, but there is no further thread or process support.
+**Concurrency:** one Run per process with a single writer (03-record-schema.md). Scope state lives in a ContextVar, so threads keep separate Scope paths, but there is no further thread or process support. *(Superseded by Package layout & render CLI (10-package-and-cli.md): Python 3.6.3 has no `contextvars`, so Scope state lives in `threading.local`; threads still keep separate paths, `asyncio` is unsupported.)*
 
 No new glossary terms: `dry_run`/`write_run` are API spellings of Dry Run / Write Run.
