@@ -86,3 +86,26 @@ td { padding: 1px 8px 1px 0; text-align: left; vertical-align: top; }
 .null { font: 600 10px var(--mono); color: #9aa3ad; border: 1px solid #d5dae0; border-radius: 3px; padding: 0 3px; }
 .empty { font-size: 11px; color: #9aa3ad; font-style: italic; }
 .mark { font: 600 10px system-ui; color: #8a5a00; background: #fff1cc; border-radius: 3px; padding: 0 4px; }
+
+/* Filter bar (ticket 08): views with counts, search, level ≥, Tree/Flat. */
+#bar:empty { display: none; }
+.fbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 14px; border-bottom: 1px solid var(--line); }
+.fbar button { font: 12px system-ui; padding: 3px 9px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+.fbar .seg { display: inline-flex; }
+.fbar .seg button { border-radius: 0; margin-left: -1px; }
+.fbar .seg button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
+.fbar .seg button:last-child { border-radius: 0 4px 4px 0; }
+.fbar .seg button.on { background: var(--sel); border-color: #a9c3f5; position: relative; }
+.fbar .n { color: var(--dim); font-variant-numeric: tabular-nums; }
+.fbar .haserr, .fbar .haserr .n { color: var(--err); font-weight: 600; }
+.fbar .haserr.on { background: #fde2e2; border-color: #f3b4b4; }
+.fbar input[type=search] { flex: 1 1 260px; min-width: 180px; font: 12px var(--mono); padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px; }
+.fbar .lvl { color: var(--dim); font-size: 12px; }
+.fbar .fcount { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+.qhelp { position: relative; }
+.qhelp summary { list-style: none; cursor: pointer; width: 20px; height: 20px; line-height: 18px; text-align: center; border: 1px solid var(--line); border-radius: 50%; color: var(--dim); font-weight: 600; }
+.qhelp summary::-webkit-details-marker { display: none; }
+.qhelp-body { position: absolute; z-index: 20; top: 26px; left: 0; width: min(560px, 90vw); padding: 8px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.12); font-size: 12px; }
+.qhelp-body p { margin: 4px 0; }
+.qhelp-body code { font: 11.5px var(--mono); }
+.qhelp-body td { padding: 1px 12px 1px 0; }

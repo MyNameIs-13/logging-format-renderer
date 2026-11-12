@@ -1,7 +1,7 @@
 """Headless Firefox checks on rendered Reports opened from file://.
 
-Covers decoding (ticket 06) and the Report core (ticket 07): Run Header, mode strip,
-notices, the list's columns and value display.
+Covers decoding (ticket 06), the Report core (ticket 07: Run Header, mode strip,
+notices, the list's columns and value display) and the filter bar (ticket 08).
 
 Skipped when firefox or node is not on PATH, or when DBFIXLOG_SKIP_BROWSER is set.
 """
@@ -38,6 +38,37 @@ PROBE = """(() => {
     rows: q(".vr").map((r) => Array.from(r.children).map((c) => c.textContent).join(" | ")),
     marks: {null: q(".vr .null").length, empty: q(".vr .empty").length, mark: q(".vr .mark").map((m) => m.textContent)},
   });
+})()"""
+
+# Drives the filter bar through its controls, reading the list after each step.
+FILTER_PROBE = """(() => {
+  const d = document.documentElement.dataset;
+  if (!d.state || d.state === "loading") return "";
+  const $ = (s) => document.querySelector(s);
+  const rows = () => Array.from(document.querySelectorAll(".vr")).map((r) =>
+    Array.from(r.children).map((c) => c.textContent).join(" | "));
+  const out = {};
+  out.views = Array.from(document.querySelectorAll("[data-view]")).map((b) =>
+    ({view: b.dataset.view, text: b.textContent, on: b.classList.contains("on"), err: b.classList.contains("haserr")}));
+  out.initial = rows();
+  const lvl = $("#bar select[name=level]");
+  lvl.value = "WARNING"; lvl.dispatchEvent(new Event("change", {bubbles: true}));
+  out.warning = rows();
+  out.count = $("#bar .fcount").textContent;
+  lvl.value = "DEBUG"; lvl.dispatchEvent(new Event("change", {bubbles: true}));
+  $("[data-view=changes]").click();
+  out.changes = rows();
+  $("[data-view=all]").click();
+  const q = $("#bar input[type=search]");
+  q.value = "acme";
+  q.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true}));
+  out.acme = rows();
+  $("[data-mode=flat]").click();
+  out.acmeFlat = rows();
+  $("[data-mode=tree]").click();
+  const link = $("[data-q]");
+  if (link) { link.click(); out.link = {q: q.value, rows: rows()}; }
+  return JSON.stringify(out);
 })()"""
 
 FIREFOX = shutil.which("firefox")
@@ -78,14 +109,14 @@ class StubReportInFirefox(unittest.TestCase):
         cls.firefox.wait()
         shutil.rmtree(cls.dir, ignore_errors=True)
 
-    def open_report(self, report):
+    def open_report(self, report, probe=PROBE):
         proc = subprocess.run(
-            [NODE, DRIVER, self.ws_url, Path(report).as_uri(), PROBE, "10000"],
+            [NODE, DRIVER, self.ws_url, Path(report).as_uri(), probe, "10000"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
         return json.loads(proc.stdout.decode("utf-8"))
 
-    def render(self, name, records):
+    def render(self, name, records, probe=PROBE):
         log = os.path.join(self.dir, name + ".jsonl")
         with open(log, "w", encoding="utf-8") as f:
             for r in records:
@@ -93,8 +124,9 @@ class StubReportInFirefox(unittest.TestCase):
         report = os.path.join(self.dir, name + ".html")
         subprocess.run([sys.executable, SCRIPT, log, "-o", report], check=True,
                        stderr=subprocess.DEVNULL)
-        page = self.open_report(report)
-        self.assertEqual(page["state"], "ready", page)
+        page = self.open_report(report, probe)
+        if probe is PROBE:
+            self.assertEqual(page["state"], "ready", page)
         return page
 
     def test_basic_fixture_renders_header_and_tree(self):
@@ -162,6 +194,44 @@ class StubReportInFirefox(unittest.TestCase):
         self.assertIn("a: NULL → (empty)", page["rows"][0])
         self.assertIn("→ 20261122053550", page["rows"][0])
         self.assertIn("<Thing>", page["rows"][0])
+
+    def test_filter_bar_views_level_search_and_mode(self):
+        report = os.path.join(self.dir, "basic_filter.html")
+        subprocess.run([sys.executable, SCRIPT, FIXTURE, "-o", report], check=True,
+                       stderr=subprocess.DEVNULL)
+        page = self.open_report(report, FILTER_PROBE)
+        self.assertEqual([(v["view"], v["on"], v["err"]) for v in page["views"]],
+                         [("all", True, False), ("changes", False, False),
+                          ("findings", False, False), ("errors", False, False)])
+        self.assertEqual([v["text"] for v in page["views"]],
+                         ["All 4", "Changes 2", "Findings 1", "Errors 0"])
+        self.assertEqual(len(page["initial"]), 6)
+        # level >= warning: the Finding plus the two Scopes that enclose it.
+        self.assertEqual(len(page["warning"]), 3, page["warning"])
+        self.assertIn("1 of 3 shown", page["warning"][1])
+        self.assertIn("1 of 3 shown", page["warning"][0])
+        self.assertIn("1 matching", page["count"])
+        self.assertEqual(len(page["changes"]), 4, page["changes"])
+        # acme matches the ACME Scope and everything in it; the phase encloses it.
+        self.assertEqual(len(page["acme"]), 5, page["acme"])
+        self.assertEqual(len(page["acmeFlat"]), 4, page["acmeFlat"])
+        self.assertNotIn("link", page)
+
+    def test_show_them_link_filters_to_mismatches(self):
+        page = self.render("dry_link", [
+            START("dry"), change("planned"), change("applied"), change("planned"), END],
+            probe=FILTER_PROBE)
+        self.assertEqual(page["views"][3]["text"], "Errors 0")
+        self.assertEqual(page["link"]["q"], "is:warn")
+        self.assertEqual(len(page["link"]["rows"]), 1)
+        self.assertIn("applied ⚠", page["link"]["rows"][0])
+
+    def test_errors_button_is_red_when_non_zero(self):
+        page = self.render("errors", [
+            START("write"), change("failed", level="ERROR", error={"type": "E", "message": "x"}), END],
+            probe=FILTER_PROBE)
+        self.assertEqual(page["views"][3]["text"], "Errors 1")
+        self.assertTrue(page["views"][3]["err"])
 
 
 TS = "2026-11-12T20:01:00.000Z"

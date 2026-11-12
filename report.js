@@ -43,7 +43,7 @@
 //
 // The page also exposes its state for tests on <html>: data-state = "loading" | "ready" |
 // "error", data-record-count, and data-error (on error). Once ready, window.dbfixlogReport
-// is {model, list, onQuery} (see renderReport): the seam later tickets hook into.
+// is {model, list, filter, onQuery} (see renderReport): the seam later tickets hook into.
 // ---------------------------------------------------------------------------------------
 
 async function decodePayload(base64Text) {
@@ -899,6 +899,116 @@ function createList(doc, wrap, m) {
   return list;
 }
 
+// ---------------------------------------------------------------------------------------
+// Filter bar (ticket 08; browser only). Views with counts, search box, level ≥, Tree/Flat.
+// ---------------------------------------------------------------------------------------
+// createFilterBar returns the filter API (window.dbfixlogReport.filter):
+//   get()          -> a copy of the state {view, q, level} (see filterRows)
+//   set(partial)   -> merges into the state, updates the controls and refreshes the list
+//   query(q)       -> shows exactly what q matches: view All, level DEBUG, search box q.
+//                     Notice links and summary-card numbers (ticket 09) use this.
+//   last           -> the latest filterRows result {rows, active, matches, shown, ms}
+// It installs itself as list.rowSource and sets list.shown for "k of n shown".
+
+const VIEW_LABELS = { all: "All", changes: "Changes", findings: "Findings", errors: "Errors" };
+
+const SEARCH_HELP =
+  "<p>Words match a record's text and the kind, key and label of the Scopes it sits in. " +
+  "All words and terms must match. Use quotes for spaces: <code>\"two words\"</code>.</p><table>" +
+  [["level>=warning, level:error,info", "level"],
+    ["type:change,finding,message,scope", "record type"],
+    ["table:orders  op:update  status:failed  check:name", "that field"],
+    ["logger:fix", "logger name (prefix)"],
+    ["key:156", "key, including enclosing Scopes' keys"],
+    ["kind:customer", "Scope kind"],
+    ["in:12", "records inside Scope 12"],
+    ["after:20:05  before:20:06:30", "time (UTC, as shown), inclusive"],
+    ["f.city=gent  f.note=null  f.note=", "fields and changed fields (old or new)"],
+    ["is:warn", "Change status that doesn't fit the Run's mode"],
+    ["is:unfinished", "unfinished Scopes"]].map((r) => "<tr><td><code>" + esc(r[0]) + "</code></td><td>" + r[1] + "</td></tr>").join("") +
+  "</table><p>While a filter is active, a Scope shows when it matches itself or holds a visible row; " +
+  "its header then adds \"k of n shown\". In Flat mode Scope rows show only when they match.</p>" +
+  "<p><span class=\"null\">NULL</span> and <span class=\"empty\">(empty)</span> are shown as logged, " +
+  "but the Uniface database loader doesn't reliably tell NULL and empty strings apart, so treat " +
+  "them as possibly the same.</p>";
+
+function filterBarHTML(m) {
+  const c = viewCounts(m);
+  const lv = Object.keys(LEVELS);
+  return '<div class="fbar">' +
+    '<span class="seg views">' + VIEWS.map((v) =>
+      '<button type="button" data-view="' + v + '" class="' + (v === "all" ? "on" : "") +
+      (v === "errors" && c.errors ? " haserr" : "") + '">' + VIEW_LABELS[v] + ' <span class="n">' +
+      c[v].toLocaleString("en") + "</span></button>").join("") + "</span>" +
+    '<input type="search" name="q" spellcheck="false" autocomplete="off" ' +
+    'placeholder="search… e.g. acme status:failed, key:156, f.city=gent">' +
+    '<details class="qhelp"><summary title="search help">?</summary><div class="qhelp-body">' + SEARCH_HELP +
+    "</div></details>" +
+    '<label class="lvl">level ≥ <select name="level">' + lv.map((l) =>
+      '<option value="' + l + '">' + (l === "DEBUG" ? "all" : l.toLowerCase()) + "</option>").join("") +
+    "</select></label>" +
+    '<span class="seg modes"><button type="button" data-mode="tree" class="on">Tree</button>' +
+    '<button type="button" data-mode="flat">Flat</button></span>' +
+    '<span class="fold-slot"></span>' + // fold buttons (ticket 10)
+    '<span class="fcount dim"></span></div>';
+}
+
+function createFilterBar(doc, bar, list, m, listEl) {
+  bar.innerHTML = filterBarHTML(m);
+  const input = bar.querySelector("input[name=q]");
+  const select = bar.querySelector("select[name=level]");
+  const count = bar.querySelector(".fcount");
+  let state = normState({});
+  let timer = 0;
+  const filter = {
+    last: null,
+    get() { return Object.assign({}, state); },
+    set(partial) {
+      clearTimeout(timer);
+      state = normState(Object.assign({}, state, partial));
+      if (input.value !== state.q) input.value = state.q;
+      if (listEl) listEl.scrollTop = 0;
+      list.refresh();
+    },
+    query(q) { filter.set({ view: "all", level: "DEBUG", q: String(q) }); },
+  };
+  function sync() {
+    for (const b of bar.querySelectorAll("[data-view]")) b.classList.toggle("on", b.dataset.view === state.view);
+    for (const b of bar.querySelectorAll("[data-mode]")) b.classList.toggle("on", b.dataset.mode === list.mode);
+    select.value = state.level;
+    const r = filter.last;
+    count.textContent = r.active
+      ? r.matches.toLocaleString("en") + " matching · " + r.rows.length.toLocaleString("en") + " rows"
+      : r.rows.length.toLocaleString("en") + " rows";
+  }
+  list.rowSource = (model, mode, collapsed) => {
+    const r = filterRows(model, state, mode, collapsed);
+    filter.last = r;
+    list.shown = r.shown;
+    sync();
+    return r.rows;
+  };
+  bar.addEventListener("click", (e) => {
+    const v = e.target.closest("[data-view]");
+    if (v) { filter.set({ view: v.dataset.view }); return; }
+    const md = e.target.closest("[data-mode]");
+    if (md) { if (listEl) listEl.scrollTop = 0; list.setMode(md.dataset.mode); }
+  });
+  select.addEventListener("change", () => filter.set({ level: select.value }));
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => filter.set({ q: input.value }), 150);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") filter.set({ q: input.value });
+    else if (e.key === "Escape") filter.set({ q: "" });
+  });
+  // Build the search index while idle, so the first keystroke doesn't pay for it.
+  const idle = doc.defaultView.requestIdleCallback || ((f) => setTimeout(f, 50));
+  idle(() => searchIndex(m));
+  return filter;
+}
+
 function renderReport(doc, app, payload) {
   const m = buildModel(payload);
   app.innerHTML = '<div class="report">' + runHeaderHTML(m) +
@@ -906,16 +1016,11 @@ function renderReport(doc, app, payload) {
     '<div id="cards"></div><div id="bar"></div>' + // slots: summary cards (09), filter bar (08)
     '<div class="listwrap"></div></div>';
   const list = createList(doc, app.querySelector(".listwrap"), m);
+  const filter = createFilterBar(doc, app.querySelector("#bar"), list, m, app.querySelector(".listwrap .list"));
   const report = {
-    model: m, list: list,
-    // Applies a query from a notice link. Ticket 08 replaces this with the real filter;
-    // until then "is:warn" jumps to the first mismatched Change.
-    onQuery(q) {
-      if (q === "is:warn" && m.warnings.length) list.scrollToRecord(m.warnings[0]);
-      else if (q === "is:unfinished" && m.unfinishedScopes.length) {
-        list.scrollToRecord(m.scopes.get(m.unfinishedScopes[0]).start);
-      }
-    },
+    model: m, list: list, filter: filter,
+    // Applies a query from a [data-q] link (notices, the mode strip, summary cards).
+    onQuery(q) { filter.query(q); },
   };
   app.addEventListener("click", (e) => {
     const a = e.target.closest("[data-q]");

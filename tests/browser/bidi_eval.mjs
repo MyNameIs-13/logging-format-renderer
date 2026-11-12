@@ -25,14 +25,16 @@ if (session.type === "error") fail("session.new: " + session.message);
 const tree = await send("browsingContext.getTree", {});
 const context = tree.result.contexts[0].context;
 const nav = await send("browsingContext.navigate", { context, url: pageUrl, wait: "complete" });
-if (nav.type === "error") fail("navigate: " + nav.message);
+if (nav.type === "error") { await send("session.end", {}); fail("navigate: " + nav.message); }
 
 const deadline = Date.now() + timeoutMs;
 let value = "";
 while (Date.now() < deadline) {
   const r = await send("script.evaluate", { expression, target: { context }, awaitPromise: true });
-  if (r.type === "error") fail("evaluate: " + r.message);
-  if (r.result.type === "exception") fail("exception: " + JSON.stringify(r.result.exceptionDetails.text));
+  // End the session before failing, or Firefox refuses the next test's session.new.
+  const bail = async (msg) => { await send("session.end", {}); fail(msg); };
+  if (r.type === "error") await bail("evaluate: " + r.message);
+  if (r.result.type === "exception") await bail("exception: " + JSON.stringify(r.result.exceptionDetails.text));
   value = r.result.result.type === "string" ? r.result.result.value : "";
   if (value) break;
   await new Promise((res) => setTimeout(res, 100));
