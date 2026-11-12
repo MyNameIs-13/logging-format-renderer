@@ -222,3 +222,41 @@ test("value display: NULL, (empty), $ markers, values as logged", () => {
   assert.match(R.valueHTML({ $unencodable: "<Foo>" }), /class="mark"[^>]*>unencodable<.*&lt;Foo&gt;/);
   assert.strictEqual(text(R.valueHTML({ a: [1, null] })), '{"a":[1,null]}');
 });
+
+test("known types with missing or odd fields are shown with a warning", () => {
+  const p = nested("dry");
+  p.records.splice(9, 0,
+    rec("change", { table: "orders", key: { id: 1 } }), // no op, no status
+    rec("finding", { level: "WARNING", msg: "no rule name" }), // no check
+    rec("change", { op: "merge", table: "orders", key: 7, status: "done" }));
+  p.lines = p.records.map((_, i) => i + 1);
+  const m = R.buildModel(p);
+  assert.match(m.odd[9], /op/);
+  assert.match(m.odd[9], /status/);
+  assert.match(m.odd[10], /check/);
+  assert.match(m.odd[11], /op "merge"/);
+  assert.match(m.odd[11], /status "done"/);
+  assert.match(m.odd[11], /key/);
+  assert.strictEqual(m.odd[4], null); // a valid Change
+  assert.strictEqual(m.odd[3], null); // a valid Finding
+
+  const st = cells(m, 9).Status;
+  assert.match(st, /⚠/);
+  assert.doesNotMatch(st, /undefined/);
+  assert.match(cells(m, 10).Status, /warning ⚠/);
+  assert.doesNotMatch(cells(m, 10).Details, /undefined/);
+
+  const [n] = R.runNotices(m).filter((x) => x.kind === "odd_fields");
+  assert.match(n.text, /^3 records have missing or odd fields \(lines 10, 11, 12\)/);
+});
+
+test("a valid Run has no odd-fields notice", () => {
+  const m = R.buildModel(nested("write", "applied"));
+  assert.ok(m.odd.every((x) => x === null));
+  assert.ok(!R.runNotices(m).some((x) => x.kind === "odd_fields"));
+});
+
+test("a planned Change in a Write Run gets the notice, not a ⚠ badge", () => {
+  const m = R.buildModel(nested("write", "applied"));
+  assert.strictEqual(cells(m, 5).Status, "planned");
+});

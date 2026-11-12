@@ -143,6 +143,10 @@ function buildModel(payload) {
       m.warnings.push(i);
     }
   }
+  // Known types with missing or odd fields: odd[i] is a reason string or null.
+  m.odd = records.map(oddFields);
+  m.oddRecords = [];
+  for (let i = 0; i < records.length; i++) if (m.odd[i]) m.oddRecords.push(i);
   m.unfinished = m.end === null;
   m.outcome = m.end ? m.end.outcome : "unfinished";
   m.unfinishedScopes = [];
@@ -157,6 +161,42 @@ function buildModel(payload) {
     }
   }
   return m;
+}
+
+// What is missing or odd about a record of a known type, or null. Such a record is still
+// shown as well as possible, with this reason as a warning.
+function oddFields(r) {
+  const out = [];
+  const has = (k) => r[k] !== undefined && r[k] !== null;
+  const oneOf = (k, allowed) => {
+    if (!has(k)) out.push("no " + k);
+    else if (allowed.indexOf(r[k]) < 0) out.push(k + " " + JSON.stringify(r[k]));
+  };
+  switch (r.type) {
+    case "change":
+      oneOf("op", CHANGE_OPS);
+      oneOf("status", CHANGE_STATUSES);
+      if (typeof r.table !== "string") out.push("no table");
+      if (has("key") && !isPlainObject(r.key)) out.push("key is not a {column: value} object");
+      else if (!has("key") && r.op !== "insert") out.push("no key");
+      if (r.op === "update" && !isPlainObject(r.changes)) out.push("update without changes");
+      break;
+    case "finding":
+      if (typeof r.check !== "string" || !r.check) out.push("no check");
+      break;
+    case "message":
+      if (!has("msg")) out.push("no msg");
+      break;
+    case "scope_start":
+      if (!has("id")) out.push("no id");
+      if (!has("kind")) out.push("no kind");
+      break;
+    case "scope_end":
+      if (!has("id")) out.push("no id");
+      oneOf("outcome", ["ok", "error"]);
+      break;
+  }
+  return out.length ? out.join("; ") : null;
 }
 
 function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
@@ -202,6 +242,13 @@ function runNotices(m) {
   if (m.unfinishedScopes.length) {
     out.push({ kind: "unfinished_scopes", tone: "amber", q: "is:unfinished",
       text: plural(m.unfinishedScopes.length, "Scope", "Scopes") + " unfinished (no scope_end record)." });
+  }
+  if (m.oddRecords.length) {
+    const lines = m.oddRecords.map((i) => m.lines[i]);
+    out.push({ kind: "odd_fields", tone: "amber",
+      text: plural(lines.length, "record has", "records have") + " missing or odd fields (line" +
+        (lines.length === 1 ? " " : "s ") + lines.slice(0, 20).join(", ") + (lines.length > 20 ? ", …" : "") +
+        "); they are shown as well as possible, marked ⚠." });
   }
   for (const n of given) out.push(givenNotice(n));
   return out;
@@ -798,9 +845,9 @@ function badge(cls, text, title) {
   return '<span class="b ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : "") + ">" + esc(text) + "</span>";
 }
 
-function levelBadge(level) {
+function levelBadge(level, odd) {
   const l = String(level || "");
-  return badge("lvb-" + (l in LEVELS ? l : "other"), l.toLowerCase());
+  return badge("lvb-" + (l in LEVELS ? l : "other") + (odd ? " st-odd" : ""), l.toLowerCase() + (odd ? " ⚠" : ""), odd);
 }
 
 function statusHTML(m, i) {
@@ -811,14 +858,18 @@ function statusHTML(m, i) {
     if (o === "unfinished") return badge("st-unfinished", "unfinished", "no scope_end record");
     return "";
   }
-  if (r.type === "scope_end") return badge("st-scope-error", "scope error");
+  const odd = m.odd[i];
+  if (r.type === "scope_end") return badge("st-scope-error", "scope error" + (odd ? " ⚠" : ""), odd);
   if (r.type === "change") {
     const w = m.warn[i];
+    // In a Dry Run an applied or failed Change is red with ⚠. A planned one in a Write Run
+    // only gets the Run-level notice.
     if (w && m.mode === "dry") return badge("st-mismatch", r.status + " ⚠", w);
-    if (w) return badge("st-" + r.status + " st-warn", r.status + " ⚠", w);
-    return badge("st-" + r.status, r.status);
+    const status = r.status === undefined || r.status === null ? "no status" : String(r.status);
+    if (odd) return badge("st-odd", status + " ⚠", odd);
+    return badge("st-" + status, status);
   }
-  return levelBadge(r.level);
+  return levelBadge(r.level, odd);
 }
 
 // Derived totals for a Scope header: records, planned/applied/failed, Findings, duration.
@@ -859,7 +910,7 @@ function detailsHTML(m, i, shown) {
       return h + (h ? msg : msg.slice(1));
     }
     case "finding":
-      return '<span class="chk">' + esc(r.check) + "</span>" + msg;
+      return r.check === undefined ? msg.slice(1) : '<span class="chk">' + esc(r.check) + "</span>" + msg;
     case "scope_end": {
       const e = r.exc || {};
       return '<span class="out-error">' + esc(scopeName(m, r.id)) + " raised " + esc(e.type || "") +
@@ -1036,6 +1087,7 @@ function recordDetailsHTML(m, i) {
   }
   h += kvRow("line", '<span class="mono">' + esc(m.lines[i]) + "</span>");
   if (m.warn[i]) h += kvRow("warning", '<span class="out-error">⚠ ' + esc(m.warn[i]) + "</span>");
+  if (m.odd[i]) h += kvRow("warning", '<span class="out-error">⚠ ' + esc(m.odd[i]) + "</span>");
   h += "</table>";
   if (isPlainObject(r.changes)) {
     h += '<section><b>Field changes</b><table class="fchanges">' +
