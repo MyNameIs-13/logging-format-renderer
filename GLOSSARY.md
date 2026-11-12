@@ -43,7 +43,7 @@ A record of one insert, update or delete of one row, with status (planned, appli
 _Avoid_: update, edit, fix, diff
 
 **Scope**:
-A named grouping around a root entity (e.g. customer 42) under which all records about it and its connected rows nest.
+A named grouping, around either a root entity (e.g. customer 42) or a named phase of the Run (e.g. orphan check), under which all records logged inside it nest. Scopes can nest inside each other. The same entity can appear in several separate Scopes.
 _Avoid_: section, block, context, group
 
 **Key**:

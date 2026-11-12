@@ -13,3 +13,5 @@ Context: see the Answer of 02-large-single-file-html.md (fixed-height virtual ro
 Context: see the Answer of 03-record-schema.md (record fields, per-row Changes with a `changes` map, `key` + `label`). Re-measure the 02 budgets with records of that shape.
 
 Context: see the Answer of 04-value-serialization.md (`$truncated`/`$bytes`/`$unencodable` markers, `null` vs `""` shown distinctly, values displayed as logged).
+
+Context: see the Answer of 05-scope-model.md (`scope_start`/`scope_end` records, `scope` id path on every record, outcome `ok`/`error`/unfinished, derived per-Scope summaries, Scope headers never hidden by the level filter).
