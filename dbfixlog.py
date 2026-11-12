@@ -3,6 +3,8 @@
 Python 3.6.3+, stdlib only. See .scratch/db-fix-logging/SPEC.md.
 """
 
+import datetime
+import enum
 import functools
 import json
 import logging
@@ -32,25 +34,112 @@ def _active_run():
 
 
 # --------------------------------------------------------------------------
-# Value encoding seam (ticket 02 fills this in).
+# Value encoding (SPEC 3.5).
 # --------------------------------------------------------------------------
 
-def _encode(value, run=None):
-    """Return ``value`` in JSON-safe form.
+# Record slots that hold logged *values*: they get the full SPEC 3.5
+# encoding, including ``max_text`` truncation. Every other slot (msg,
+# Run Header fields, exc, ...) is only made JSON-safe.
+VALUE_SLOTS = ("key", "label", "fields", "changes")
+
+DEFAULT_MAX_TEXT = 1000
+BYTES_PREFIX = 64
+
+
+def _encode(value, run=None, truncate=True):
+    """Return ``value`` in JSON-safe form, for display (SPEC 3.5).
 
     This is the single place that turns a Python value into something
     ``json.dumps(..., allow_nan=False)`` accepts. ``run`` carries the
-    Run's ``encoders``, ``strict`` and ``max_text`` settings.
+    Run's ``encoders``, ``strict`` and ``max_text`` settings. With
+    ``truncate=False`` long text is kept whole (non-value slots).
+
+    A custom encoder (``encoders={Type: fn}``, matched along the value's
+    MRO) wins over the built-in rules. Its result is encoded again, by
+    the built-in rules alone if it has the same type as the input.
     """
-    if value is None or isinstance(value, (bool, int, str)):
+    fn = _custom_encoder(value, run)
+    if fn is not None:
+        try:
+            result = fn(value)
+        except Exception as e:
+            return _unencodable(value, e, run)
+        if type(result) is type(value):
+            return _builtin_encode(result, run, truncate)
+        return _encode(result, run, truncate)
+    return _builtin_encode(value, run, truncate)
+
+
+def _custom_encoder(value, run):
+    encoders = getattr(run, "encoders", None)
+    if not encoders:
+        return None
+    for cls in type(value).__mro__:
+        fn = encoders.get(cls)
+        if fn is not None:
+            return fn
+    return None
+
+
+def _builtin_encode(value, run, truncate):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, enum.Enum):
+        return _encode(value.value, run, truncate)
+    if isinstance(value, str):
+        limit = (getattr(run, "max_text", DEFAULT_MAX_TEXT) if run is not None
+                 else DEFAULT_MAX_TEXT)
+        if truncate and limit is not None and len(value) > limit:
+            return {"$truncated": value[:limit], "length": len(value)}
+        return value
+    if isinstance(value, int):
         return value
     if isinstance(value, float):
+        if value != value:
+            return "NaN"
+        if value in (float("inf"), float("-inf")):
+            return "Infinity" if value > 0 else "-Infinity"
         return value
+    if isinstance(value, (datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        data = bytes(value)
+        return {"$bytes": data[:BYTES_PREFIX].hex(), "length": len(data)}
     if isinstance(value, dict):
-        return {str(k): _encode(v, run) for k, v in value.items()}
+        return {str(k): _encode(v, run, truncate) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_encode(v, run) for v in value]
-    return str(value)
+        return [_encode(v, run, truncate) for v in value]
+    if isinstance(value, (set, frozenset)):
+        try:
+            items = sorted(value)
+        except TypeError:
+            items = list(value)
+        return [_encode(v, run, truncate) for v in items]
+    return _str_or_unencodable(value, run)
+
+
+def _str_or_unencodable(value, run):
+    try:
+        return str(value)
+    except Exception as e:
+        return _unencodable(value, e, run)
+
+
+def _unencodable(value, error, run):
+    """``{"$unencodable": ...}`` for ``error``; re-raises it under strict."""
+    if run is not None and run.strict:
+        raise error
+    try:
+        text = repr(value)
+    except Exception:
+        text = "%s: %s" % (type(error).__name__, error)
+    return {"$unencodable": text}
+
+
+def _encode_record(rec, run=None):
+    """Encode a whole record dict: value slots fully, the rest JSON-safe."""
+    return {k: _encode(v, run, truncate=k in VALUE_SLOTS)
+            for k, v in rec.items()}
 
 
 # --------------------------------------------------------------------------
@@ -137,7 +226,7 @@ class JsonlHandler(logging.Handler):
         self.run = run
 
     def write_dict(self, rec):
-        line = json.dumps(_encode(rec, self.run), ensure_ascii=False,
+        line = json.dumps(_encode_record(rec, self.run), ensure_ascii=False,
                           allow_nan=False, separators=(",", ":"))
         self.acquire()
         try:
@@ -150,6 +239,8 @@ class JsonlHandler(logging.Handler):
         try:
             self.write_dict(_record_from_logrecord(record))
         except Exception:
+            if self.run is not None and self.run.strict:
+                raise
             self.handleError(record)
 
 
