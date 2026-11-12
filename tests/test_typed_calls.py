@@ -57,6 +57,52 @@ class ChangeTest(TypedCallTestCase):
         for absent in ("msg", "changes", "error", "fields"):
             self.assertNotIn(absent, c)
 
+    def test_write_run_defaults_to_applied(self):
+        with dbfixlog.run(self.path, mode="write", console=False) as log:
+            log.change("orders", "delete", key={"id": 156})
+        [c] = self.body()
+        self.assertEqual(c["status"], "applied")
+        self.assertEqual(c["level"], "INFO")
+
+    def test_error_makes_failed_at_error_level(self):
+        with dbfixlog.run(self.path, mode="write", console=False) as log:
+            try:
+                raise ValueError("FK violation")
+            except ValueError as e:
+                log.change("orders", "delete", key={"id": 156}, error=e,
+                           msg="delete failed")
+        [c] = self.body()
+        self.assertEqual(c["status"], "failed")
+        self.assertEqual(c["level"], "ERROR")
+        self.assertEqual(c["error"], {"type": "ValueError",
+                                      "message": "FK violation"})
+        self.assertEqual(c["msg"], "delete failed")
+        self.assertNotIn("exc", c)
+
+    def test_explicit_status_wins(self):
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            log.change("orders", "delete", key={"id": 1}, status="applied")
+            log.change("orders", "delete", key={"id": 2}, status="planned",
+                       error=RuntimeError("x"))
+            log.change("orders", "delete", key={"id": 3}, status="failed")
+        a, b, c = self.body()
+        self.assertEqual(a["status"], "applied")
+        self.assertEqual(b["status"], "planned")
+        self.assertEqual(b["error"], {"type": "RuntimeError", "message": "x"})
+        self.assertEqual(c["status"], "failed")
+        self.assertEqual(c["level"], "ERROR")
+
+    def test_explicit_level_wins(self):
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            log.change("orders", "delete", key={"id": 1},
+                       level=logging.WARNING, fields={"batch": 3})
+            log.change("orders", "delete", key={"id": 2},
+                       error=RuntimeError("x"), level=logging.CRITICAL)
+        a, b = self.body()
+        self.assertEqual(a["level"], "WARNING")
+        self.assertEqual(a["fields"], {"batch": 3})
+        self.assertEqual(b["level"], "CRITICAL")
+
 
 if __name__ == "__main__":
     unittest.main()

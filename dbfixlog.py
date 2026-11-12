@@ -273,15 +273,22 @@ class RunLogger(logging.LoggerAdapter):
                msg=None, status=None, error=None, level=None, fields=None):
         """Log one row operation as a Change (SPEC 3.3, 4.3)."""
         run = _active_run()
-        if status is None and run is not None:
-            status = "planned" if run.mode == "dry" else "applied"
+        if status is None:
+            if error is not None:
+                status = "failed"
+            elif run is not None:
+                status = "planned" if run.mode == "dry" else "applied"
+        if error is not None:
+            # The exception itself becomes ``str()`` at write time, through
+            # _encode, so a raising __str__ never escapes the call.
+            error = {"type": type(error).__name__, "message": error}
         data = {"type": "change", "msg": msg, "table": table, "op": op}
         for k, v in (("key", key), ("label", label), ("status", status),
-                     ("fields", fields)):
+                     ("error", error), ("fields", fields)):
             if v is not None:
                 data[k] = v
         if level is None:
-            level = logging.INFO
+            level = logging.ERROR if status == "failed" else logging.INFO
         self._typed(level, "%s %s" % (op, table), data, _caller(1)[0])
 
     def _typed(self, level, text, data, src):
