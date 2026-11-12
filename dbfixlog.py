@@ -31,17 +31,35 @@ def _active_run():
 
 
 # --------------------------------------------------------------------------
-# Value encoding seam (ticket 02 fills this in).
+# Value encoding (SPEC 3.5).
 # --------------------------------------------------------------------------
 
-def _encode(value, run=None):
-    """Return ``value`` in JSON-safe form.
+# Record slots that hold logged *values*: they get the full SPEC 3.5
+# encoding, including ``max_text`` truncation. Every other slot (msg,
+# Run Header fields, exc, ...) is only made JSON-safe.
+VALUE_SLOTS = ("key", "label", "fields", "changes")
+
+DEFAULT_MAX_TEXT = 1000
+BYTES_PREFIX = 64
+
+
+def _encode(value, run=None, truncate=True):
+    """Return ``value`` in JSON-safe form, for display (SPEC 3.5).
 
     This is the single place that turns a Python value into something
     ``json.dumps(..., allow_nan=False)`` accepts. ``run`` carries the
-    Run's ``encoders``, ``strict`` and ``max_text`` settings.
+    Run's ``encoders``, ``strict`` and ``max_text`` settings. With
+    ``truncate=False`` long text is kept whole (non-value slots).
     """
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        limit = (getattr(run, "max_text", DEFAULT_MAX_TEXT) if run is not None
+                 else DEFAULT_MAX_TEXT)
+        if truncate and limit is not None and len(value) > limit:
+            return {"$truncated": value[:limit], "length": len(value)}
+        return value
+    if isinstance(value, int):
         return value
     if isinstance(value, float):
         if value != value:
@@ -51,11 +69,26 @@ def _encode(value, run=None):
         return value
     if isinstance(value, (datetime.date, datetime.time)):
         return value.isoformat()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        data = bytes(value)
+        return {"$bytes": data[:BYTES_PREFIX].hex(), "length": len(data)}
     if isinstance(value, dict):
-        return {str(k): _encode(v, run) for k, v in value.items()}
+        return {str(k): _encode(v, run, truncate) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_encode(v, run) for v in value]
+        return [_encode(v, run, truncate) for v in value]
+    if isinstance(value, (set, frozenset)):
+        try:
+            items = sorted(value)
+        except TypeError:
+            items = list(value)
+        return [_encode(v, run, truncate) for v in items]
     return str(value)
+
+
+def _encode_record(rec, run=None):
+    """Encode a whole record dict: value slots fully, the rest JSON-safe."""
+    return {k: _encode(v, run, truncate=k in VALUE_SLOTS)
+            for k, v in rec.items()}
 
 
 # --------------------------------------------------------------------------
@@ -139,7 +172,7 @@ class JsonlHandler(logging.Handler):
         self.run = run
 
     def write_dict(self, rec):
-        line = json.dumps(_encode(rec, self.run), ensure_ascii=False,
+        line = json.dumps(_encode_record(rec, self.run), ensure_ascii=False,
                           allow_nan=False, separators=(",", ":"))
         self.acquire()
         try:
