@@ -11,3 +11,5 @@ Which calls does a script author actually write? Covers: setup (opening the Log 
 Context: see the Answer of 03-record-schema.md (record fields), 04-value-serialization.md (encoder mapping, `strict`, truncation; logging never raises) and 05-scope-model.md (`scope_start`/`scope_end`, ids, re-raise on error, written regardless of level).
 
 Context: see the Answer of 06-run-header.md (`run_start` fields the API must accept: `mode` required, optional `title`/`description`/`target`/`fields`; `run_end` with `outcome` ok/error/interrupted, `exit_code`, `duration_ms`, written even on exceptions; both written regardless of level).
+
+Context: see the Answer of 07-report-layout.md (a Dry Run with any `applied`/`failed` Change gets a red "the script may have written to the database" strip; the Report only knows what was logged, so whether the API itself guards a Dry Run against writes matters here).

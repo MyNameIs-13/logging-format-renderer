@@ -29,11 +29,13 @@ A spec, ready to hand off for building, for (1) a Python stdlib-`logging`-based 
 - [Serialization of database values](issues/04-value-serialization.md): display-only plain JSON (Decimal as string, ISO dates, Uniface date strings as received), `$truncated`/`$bytes`/`$unencodable` markers, no NULL-vs-empty guarantee, logging never raises
 - [Scope model](issues/05-scope-model.md): `scope_start`/`scope_end` records (`id`, `kind`, optional `key`/`label`; end has `outcome` ok/error + `exc` + `duration_ms`), id path `scope: [1,2]` on every record; phases allowed, no merging, always written regardless of level, missing end = unfinished
 - [Run Header contents](issues/06-run-header.md): `run_start` (`format` "1.0", required `mode` dry/write, optional `title`/`description`/`target`/`fields`, no automatic context or run id) and `run_end` (`outcome` ok/error/interrupted, `duration_ms`, `exit_code`; missing = unfinished), both always written
+- [Report layout](issues/07-report-layout.md): prototype variant E: run summary (foldable cards) over one list with sticky, resizable columns (Time, Scope tree, Status = Change status or level, Op, Table, Key, Label, Details), sticky Scopes, All/Changes/Findings/Errors views, one query-syntax search that also matches enclosing Scopes, details panel on demand; red strip for a Dry Run that logged applied/failed Changes; budgets hold at 100k (2.9 MB, ~350 ms, ≤ 25 ms)
 
 ## Not yet specified
 
 - **Dry Run vs Write Run comparison**: whether/how a Report can relate a Write Run to the Dry Run that preceded it (did everything planned get applied?). There is no run identity (see Run Header contents), so matching would go by Changes alone, by `table` + `key`/`label` + `op` (see Record schema).
-- **Rich content in records**: tables, links, code/SQL blocks beyond text and key/value fields. Revisit once the Record schema and Report layout show whether it's missed.
+- **Rich content in records**: tables, links, code/SQL blocks beyond text and key/value fields. Report layout surfaced no need for it (Details column plus details panel covered every record); revisit only if real scripts miss it.
+- **Size budget with real data**: the 100k prototype was 2.9 MB, but its synthetic values compress ~9.5x. Real Log Files at 4–6x would be 5–7 MB, over the 5 MB budget (see Report layout). Needs a measurement on realistic or real data once a script exists, then either raise the budget or slim the records.
 - **Package layout & CLI**: package name, `render` command options (output path, title, opening a browser), Python version support.
 
 ## Out of scope
