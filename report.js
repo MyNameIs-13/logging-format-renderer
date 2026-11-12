@@ -440,6 +440,37 @@ function isEntry(r) {
 }
 
 // ---------------------------------------------------------------------------------------
+// Folding, sticky Scopes, details panel, column widths (pure; ticket 10)
+// ---------------------------------------------------------------------------------------
+
+// The collapsed set for a fold button: "all" folds every Scope, "phases" folds every entity
+// Scope (one with a key) so the phases stay open, "none" expands all.
+function foldSet(m, how) {
+  const out = new Set();
+  if (how !== "all" && how !== "phases") return out;
+  for (const s of m.scopes.values()) {
+    if (how === "all" || m.records[s.start].key !== undefined) out.add(s.id);
+  }
+  return out;
+}
+
+// Tree mode sticky Scopes for a list scrolled so that rows[k] is the top row. The pinned
+// rows overlay the list, so pinned row d covers rows[k + d]: it is the depth-d Scope that
+// encloses rows[k + d]. Stops at the first covered row that is not that deep.
+function stickyScopes(m, rows, k) {
+  const path = [];
+  for (let d = 0; k + d < rows.length; d++) {
+    const p = m.records[rows[k + d]].scope;
+    if (!Array.isArray(p) || p.length <= d) break;
+    let same = true;
+    for (let j = 0; j < d; j++) if (p[j] !== path[j]) same = false;
+    if (!same) break;
+    path.push(p[d]);
+  }
+  return path;
+}
+
+// ---------------------------------------------------------------------------------------
 // DOM (browser only)
 // ---------------------------------------------------------------------------------------
 
@@ -594,4 +625,6 @@ if (typeof document !== "undefined") startReport(document);
 if (typeof module !== "undefined") module.exports = {
   decodePayload, buildModel, modeStrip, runNotices, isEntry, isHeader, isRow, treeRows, flatRows,
   rowCells, rowClass, valueHTML, scopeName, hms, duration, esc, LEVELS, COLUMNS,
+  // ticket 10
+  foldSet, stickyScopes,
 };
