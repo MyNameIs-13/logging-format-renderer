@@ -233,6 +233,63 @@ class ValueTest(unittest.TestCase):
         head = read_records(self.path)[0]
         self.assertEqual(head["target"], {"ratio": "NaN", "db": "x" * 2000})
 
+    def test_self_containing_list_is_written_with_a_cycle_marker(self):
+        v = [1]
+        v.append(v)
+        written = self.logged(v)
+        self.assertEqual(written[0], 1)
+        self.assertIn("$unencodable", written[1])
+
+    def test_self_containing_dict_is_written_with_a_cycle_marker(self):
+        v = {"a": 1}
+        v["self"] = v
+        written = self.logged(v)
+        self.assertEqual(written["a"], 1)
+        self.assertIn("$unencodable", written["self"])
+
+    def test_shared_non_cyclic_values_are_not_cycles(self):
+        shared = [1]
+        self.assertEqual(self.logged({"a": shared, "b": shared}),
+                         {"a": [1], "b": [1]})
+
+    def test_dict_key_whose_str_raises_still_writes_the_record(self):
+        class BadKey(object):
+            def __str__(self):
+                raise ValueError("boom")
+
+            def __repr__(self):
+                return "<BadKey>"
+
+            def __hash__(self):
+                return 1
+        v = self.logged({BadKey(): 1, "ok": 2})
+        self.assertEqual(v["ok"], 2)
+        [k] = [k for k in v if k != "ok"]
+        self.assertIn("<BadKey>", k)
+        self.assertEqual(v[k], 1)
+
+    def test_strict_raises_on_a_cycle(self):
+        v = []
+        v.append(v)
+        with dbfixlog.run(self.path, mode="dry", console=False,
+                          strict=True) as log:
+            with self.assertRaises(ValueError):
+                log.info("v", fields={"v": v})
+
+    def test_exception_whose_str_raises_still_writes_the_record(self):
+        class BadError(Exception):
+            def __str__(self):
+                raise ValueError("boom")
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            try:
+                raise BadError()
+            except BadError:
+                log.exception("failed")
+        [m] = self.messages()
+        self.assertEqual(m["msg"], "failed")
+        self.assertEqual(m["exc"]["type"], "BadError")
+        self.assertIn("$unencodable", m["exc"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

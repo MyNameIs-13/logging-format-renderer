@@ -46,7 +46,7 @@ DEFAULT_MAX_TEXT = 1000
 BYTES_PREFIX = 64
 
 
-def _encode(value, run=None, truncate=True):
+def _encode(value, run=None, truncate=True, _open=None):
     """Return ``value`` in JSON-safe form, for display (SPEC 3.5).
 
     This is the single place that turns a Python value into something
@@ -57,6 +57,9 @@ def _encode(value, run=None, truncate=True):
     A custom encoder (``encoders={Type: fn}``, matched along the value's
     MRO) wins over the built-in rules. Its result is encoded again, by
     the built-in rules alone if it has the same type as the input.
+
+    ``_open`` holds the ids of the containers being encoded around this
+    value: a container that contains itself becomes ``$unencodable``.
     """
     fn = _custom_encoder(value, run)
     if fn is not None:
@@ -65,9 +68,9 @@ def _encode(value, run=None, truncate=True):
         except Exception as e:
             return _unencodable(value, e, run)
         if type(result) is type(value):
-            return _builtin_encode(result, run, truncate)
-        return _encode(result, run, truncate)
-    return _builtin_encode(value, run, truncate)
+            return _builtin_encode(result, run, truncate, _open)
+        return _encode(result, run, truncate, _open)
+    return _builtin_encode(value, run, truncate, _open)
 
 
 def _custom_encoder(value, run):
@@ -81,11 +84,14 @@ def _custom_encoder(value, run):
     return None
 
 
-def _builtin_encode(value, run, truncate):
+CONTAINERS = (dict, list, tuple, set, frozenset)
+
+
+def _builtin_encode(value, run, truncate, _open=None):
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, enum.Enum):
-        return _encode(value.value, run, truncate)
+        return _encode(value.value, run, truncate, _open)
     if isinstance(value, str):
         limit = (getattr(run, "max_text", DEFAULT_MAX_TEXT) if run is not None
                  else DEFAULT_MAX_TEXT)
@@ -105,17 +111,39 @@ def _builtin_encode(value, run, truncate):
     if isinstance(value, (bytes, bytearray, memoryview)):
         data = bytes(value)
         return {"$bytes": data[:BYTES_PREFIX].hex(), "length": len(data)}
+    if isinstance(value, CONTAINERS):
+        if _open is None:
+            _open = set()
+        if id(value) in _open:
+            return _unencodable(value, ValueError("value contains itself"),
+                                run)
+        _open.add(id(value))
+        try:
+            return _encode_container(value, run, truncate, _open)
+        finally:
+            _open.discard(id(value))
+    return _str_or_unencodable(value, run)
+
+
+def _encode_container(value, run, truncate, _open):
     if isinstance(value, dict):
-        return {str(k): _encode(v, run, truncate) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_encode(v, run, truncate) for v in value]
+        return {_encode_key(k, run): _encode(v, run, truncate, _open)
+                for k, v in value.items()}
     if isinstance(value, (set, frozenset)):
         try:
-            items = sorted(value)
+            value = sorted(value)
         except TypeError:
-            items = list(value)
-        return [_encode(v, run, truncate) for v in items]
-    return _str_or_unencodable(value, run)
+            value = list(value)
+    return [_encode(v, run, truncate, _open) for v in value]
+
+
+def _encode_key(key, run):
+    """A dict key as a JSON object key: ``str(key)``, or the
+    ``$unencodable`` text when that raises."""
+    text = _str_or_unencodable(key, run)
+    if isinstance(text, dict):
+        return "$unencodable: " + text["$unencodable"]
+    return text
 
 
 def _str_or_unencodable(value, run):
@@ -164,7 +192,9 @@ def _exc_dict(exc_info):
     etype, evalue, tb = exc_info
     return {
         "type": etype.__name__,
-        "message": str(evalue),
+        # Encoded with str() at write time, so a raising __str__ becomes
+        # $unencodable instead of losing the record.
+        "message": evalue,
         "traceback": "".join(traceback.format_exception(etype, evalue, tb)),
     }
 
