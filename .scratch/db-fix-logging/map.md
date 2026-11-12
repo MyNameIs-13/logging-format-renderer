@@ -26,12 +26,13 @@ A spec, ready to hand off for building, for (1) a Python stdlib-`logging`-based 
 - [Prior-art survey for structured logs → HTML](issues/01-prior-art-survey.md): nothing does this end to end; use plain stdlib `logging` (ContextVar + Filter for Scopes); learn from Eliot (start/end records, sequence numbers) and pytest-html (embedded JSON blob + JS)
 - [Making 100k records usable in one HTML file](issues/02-large-single-file-html.md): feasible with plain JS: gzip+base64 embedded JSON (~3 MB), fixed-height virtual rows, linear-scan search (2–6 ms); budgets ≤ 5 MB / ≤ 0.5 s load / ≤ 50 ms search
 - [Record schema for Message, Finding, Change](issues/03-record-schema.md): flat JSON records (`ts`, `level`, `logger`, `type`, `src`, `msg`, `scope`, `fields`, `exc`); one Change per row operation (`op` update/insert/delete, `changes` old/new map, final `status`); rows identified by `key` + human `label`; order = line position
+- [Serialization of database values](issues/04-value-serialization.md): display-only plain JSON (Decimal as string, ISO dates, Uniface date strings as received), `$truncated`/`$bytes`/`$unencodable` markers, no NULL-vs-empty guarantee, logging never raises
 
 ## Not yet specified
 
 - **Dry Run vs Write Run comparison**: whether/how a Report can relate a Write Run to the Dry Run that preceded it (did everything planned get applied?). Hangs on the Run Header (run identity); Changes could be matched by `table` + `key`/`label` + `op` (see Record schema).
 - **Rich content in records**: tables, links, code/SQL blocks beyond text and key/value fields. Revisit once the Record schema and Report layout show whether it's missed.
-- **Logger API ergonomics**: what calls a script author actually writes (`log.finding(...)`, `log.change(...)`, `scope(...)`, mode handling, setup). Becomes specifiable once Record schema and Scope model are decided.
+- **Logger API ergonomics**: what calls a script author actually writes (`log.finding(...)`, `log.change(...)`, `scope(...)`, mode handling, setup, incl. the custom type → encoder mapping, `strict` flag and truncation limit from Serialization of database values). Becomes specifiable once Record schema and Scope model are decided.
 - **Package layout & CLI**: package name, `render` command options (output path, title, opening a browser), Python version support.
 
 ## Out of scope

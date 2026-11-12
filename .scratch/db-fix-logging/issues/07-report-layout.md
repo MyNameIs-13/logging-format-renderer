@@ -11,3 +11,5 @@ What does the Report look like and how does it behave? What is shown first (Run 
 Context: see the Answer of 02-large-single-file-html.md (fixed-height virtual rows, details in a side panel, own search box, Scope headers kept visible for matches).
 
 Context: see the Answer of 03-record-schema.md (record fields, per-row Changes with a `changes` map, `key` + `label`). Re-measure the 02 budgets with records of that shape.
+
+Context: see the Answer of 04-value-serialization.md (`$truncated`/`$bytes`/`$unencodable` markers, `null` vs `""` shown distinctly, values displayed as logged).
