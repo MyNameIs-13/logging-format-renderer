@@ -21,15 +21,74 @@ PROG = "dbfixlog_render"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+MAX_SAMPLES = 5
+MAX_SAMPLE_CHARS = 200
+INCOMPLETE_MESSAGE = "last line incomplete, file may still be written"
+
+
+class Fatal(Exception):
+    """A fatal error: one stderr line prefixed with the program name, then exit `code`."""
+
+    def __init__(self, code, message):
+        Exception.__init__(self, message)
+        self.code = code
+
+
+def _reject_constant(name):
+    raise ValueError("non-JSON constant " + name)
+
+
+def _parse_line(line):
+    """The record on one Log File line, or None if the line is malformed."""
+    try:
+        value = json.loads(line.decode("utf-8"), parse_constant=_reject_constant)
+    except ValueError:  # includes UnicodeDecodeError and json's decode error
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _load_records(raw):
-    records = []
-    lines = []
-    for number, line in enumerate(raw.split(b"\n"), start=1):
-        if not line:
-            continue
-        records.append(json.loads(line.decode("utf-8")))
-        lines.append(number)
-    return records, lines
+    """Split a snapshot of the Log File into records, their 1-based line numbers, and the
+    numbers and text of malformed lines. A last line without a trailing newline is
+    returned separately as incomplete (its line number), never parsed."""
+    chunks = raw.split(b"\n")
+    incomplete = None
+    if chunks[-1] == b"":
+        chunks.pop()  # the file ends with a newline
+    else:
+        incomplete = len(chunks)
+        chunks.pop()
+    records, lines, bad = [], [], []
+    for number, line in enumerate(chunks, start=1):
+        record = _parse_line(line)
+        if record is None:
+            bad.append((number, line))
+        else:
+            records.append(record)
+            lines.append(number)
+    return records, lines, bad, incomplete
+
+
+def _malformed_notice(bad):
+    samples = []
+    for number, line in bad[:MAX_SAMPLES]:
+        text = line.decode("utf-8", "replace").rstrip("\r")
+        if len(text) > MAX_SAMPLE_CHARS:
+            text = text[:MAX_SAMPLE_CHARS] + "…"
+        samples.append({"line": number, "text": text})
+    count = len(bad)
+    return {
+        "kind": "malformed_lines",
+        "count": count,
+        "lines": [number for number, _ in bad],
+        "samples": samples,
+        "message": "{} malformed line{} skipped".format(count, "" if count == 1 else "s"),
+    }
+
+
+def _line_list(numbers, limit=20):
+    text = ", ".join(str(n) for n in numbers[:limit])
+    return text + (", …" if len(numbers) > limit else "")
 
 
 def _title(flag, header, log_path):
@@ -76,18 +135,39 @@ def main(argv=None):
     parser.add_argument("log")
     parser.add_argument("-o", dest="output", metavar="PATH|-")
     parser.add_argument("--title", metavar="TEXT")
+    parser.add_argument("--strict", action="store_true")
     args = parser.parse_args(argv)
+    try:
+        return _render(args)
+    except Fatal as e:
+        sys.stderr.write("{}: {}\n".format(PROG, e))
+        return e.code
+
+
+def _render(args):
     with open(args.log, "rb") as f:
         raw = f.read()
-    records, lines = _load_records(raw)
+    records, lines, bad, incomplete = _load_records(raw)
+    notices = []
+    if bad:
+        if args.strict:
+            raise Fatal(4, "{}: {} malformed line{} (line {}); not rendering under --strict".format(
+                args.log, len(bad), "" if len(bad) == 1 else "s", _line_list([n for n, _ in bad])))
+        notices.append(_malformed_notice(bad))
+        sys.stderr.write("{}: warning: {}: skipped {} malformed line{}: {}\n".format(
+            PROG, args.log, len(bad), "" if len(bad) == 1 else "s",
+            _line_list([n for n, _ in bad])))
+    if incomplete is not None:
+        notices.append({"kind": "incomplete_last_line", "line": incomplete,
+                        "message": INCOMPLETE_MESSAGE})
     title = _title(args.title, records[0], args.log)
     payload = {
         "payload": PAYLOAD_VERSION,
         "renderer": __version__,
         "source": os.path.basename(args.log),
         "title": title,
-        "unfinished": False,
-        "notices": [],
+        "unfinished": not any(r.get("type") == "run_end" for r in records),
+        "notices": notices,
         "records": records,
         "lines": lines,
     }
