@@ -174,19 +174,8 @@ class ChangeMisuseTest(TypedCallTestCase):
                 self.assertEqual(change["src"], src)
                 self.assertEqual(warning["src"], src)
 
-    def test_misuse_raises_under_strict(self):
-        for name, args, kwargs, _ in self.CASES:
-            with self.subTest(name):
-                with dbfixlog.run(self.path, mode="dry", console=False,
-                                  strict=True, overwrite=True) as log:
-                    with self.assertRaises(ValueError) as cm:
-                        log.change(*args, **kwargs)
-                self.assertIn("invalid change call", str(cm.exception))
-                self.assertEqual(self.body(), [])
-
     def test_valid_calls_write_no_warning(self):
-        with dbfixlog.run(self.path, mode="dry", console=False,
-                          strict=True) as log:
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
             log.change("orders", "insert", label={"no": "B1"})
             log.change("orders", "insert", key={"id": 9})
             log.change("orders", "update", key={"id": 1},
@@ -280,10 +269,11 @@ import dbfixlog
 log = dbfixlog.get_logger(__name__)
 
 
-def fix(order_id):
+def fix(run_log, order_id):
     log.info("fixing", fields={"id": order_id})
     log.finding("orphan-order", key={"id": order_id})
     log.change("orders", "delete", key={"id": order_id})
+    return run_log.dry_run
 '''
 
 
@@ -300,8 +290,10 @@ class GetLoggerTest(TypedCallTestCase):
     def test_helper_module_logs_into_active_run(self):
         # The helper's logger is created at import time, before the Run.
         helper = self.import_helper()
-        with dbfixlog.run(self.path, mode="dry", console=False):
-            helper.fix(156)
+        # The script passes its own log in, so the helper can branch on the mode.
+        with dbfixlog.run(self.path, mode="dry", console=False) as run_log:
+            dry = helper.fix(run_log, 156)
+        self.assertTrue(dry)
         msg, finding, change = self.body()
         for rec, line in ((msg, 7), (finding, 8), (change, 9)):
             self.assertEqual(rec["logger"], "fixhelper")
@@ -350,8 +342,8 @@ class OutsideRunTest(unittest.TestCase):
                          "object, got int 156"),
              ("WARNING", "orphan-order: no customer"),
              ("INFO", "inside")])
-        self.assertFalse(log.dry_run)
-        self.assertFalse(log.write_run)
+        self.assertFalse(hasattr(log, "dry_run"))
+        self.assertFalse(hasattr(log, "write_run"))
 
 
 if __name__ == "__main__":

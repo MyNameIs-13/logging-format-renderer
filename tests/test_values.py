@@ -146,16 +146,6 @@ class ValueTest(unittest.TestCase):
         self.assertEqual(v["ok"], 1)
         self.assertIn("ValueError: boom", v["w"]["$unencodable"])
 
-    def test_strict_raises_instead_of_unencodable(self):
-        class Bad(object):
-            def __str__(self):
-                raise ValueError("boom")
-        with dbfixlog.run(self.path, mode="dry", console=False,
-                          strict=True) as log:
-            with self.assertRaises(ValueError):
-                log.info("v", fields={"v": Bad()})
-        self.assertEqual(self.messages(), [])
-
     def test_custom_encoders_take_precedence(self):
         enc = {decimal.Decimal: float,
                datetime.datetime: lambda d: d.strftime("%Y%m%d%H%M%S")}
@@ -264,14 +254,6 @@ class ValueTest(unittest.TestCase):
         [k] = [k for k in v if k != "ok"]
         self.assertIn("<BadKey>", k)
         self.assertEqual(v[k], 1)
-
-    def test_strict_raises_on_a_cycle(self):
-        v = []
-        v.append(v)
-        with dbfixlog.run(self.path, mode="dry", console=False,
-                          strict=True) as log:
-            with self.assertRaises(ValueError):
-                log.info("v", fields={"v": v})
 
     def test_exception_whose_str_raises_still_writes_the_record(self):
         class BadError(Exception):

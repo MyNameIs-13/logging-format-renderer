@@ -45,7 +45,7 @@ def _encode(value, run=None, truncate=True, _open=None):
 
     This is the single place that turns a Python value into something
     ``json.dumps(..., allow_nan=False)`` accepts. ``run`` carries the
-    Run's ``encoders``, ``strict`` and ``max_text`` settings. With
+    Run's ``encoders`` and ``max_text`` settings. With
     ``truncate=False`` long text is kept whole (non-value slots).
 
     A custom encoder (``encoders={Type: fn}``, matched along the value's
@@ -60,7 +60,7 @@ def _encode(value, run=None, truncate=True, _open=None):
         try:
             result = fn(value)
         except Exception as e:
-            return _unencodable(value, e, run)
+            return _unencodable(value, e)
         if type(result) is type(value):
             return _builtin_encode(result, run, truncate, _open)
         return _encode(result, run, truncate, _open)
@@ -109,19 +109,18 @@ def _builtin_encode(value, run, truncate, _open=None):
         if _open is None:
             _open = set()
         if id(value) in _open:
-            return _unencodable(value, ValueError("value contains itself"),
-                                run)
+            return _unencodable(value, ValueError("value contains itself"))
         _open.add(id(value))
         try:
             return _encode_container(value, run, truncate, _open)
         finally:
             _open.discard(id(value))
-    return _str_or_unencodable(value, run)
+    return _str_or_unencodable(value)
 
 
 def _encode_container(value, run, truncate, _open):
     if isinstance(value, dict):
-        return {_encode_key(k, run): _encode(v, run, truncate, _open)
+        return {_encode_key(k): _encode(v, run, truncate, _open)
                 for k, v in value.items()}
     if isinstance(value, (set, frozenset)):
         try:
@@ -131,26 +130,20 @@ def _encode_container(value, run, truncate, _open):
     return [_encode(v, run, truncate, _open) for v in value]
 
 
-def _encode_key(key, run):
+def _encode_key(key):
     """A dict key as a JSON object key: ``str(key)``, or the
     ``$unencodable`` text when that raises."""
-    text = _str_or_unencodable(key, run)
+    text = _str_or_unencodable(key)
     if isinstance(text, dict):
         return "$unencodable: " + text["$unencodable"]
     return text
 
 
-def _str_or_unencodable(value, run):
+def _str_or_unencodable(value):
     try:
         return str(value)
     except Exception as e:
-        return _unencodable(value, e, run)
-
-
-def _raise_if_strict(run):
-    """Inside an ``except`` block: re-raise the exception under strict."""
-    if run is not None and run.strict:
-        raise
+        return _unencodable(value, e)
 
 
 def _given(**values):
@@ -158,10 +151,8 @@ def _given(**values):
     return {k: v for k, v in values.items() if v is not None}
 
 
-def _unencodable(value, error, run):
-    """``{"$unencodable": ...}`` for ``error``; re-raises it under strict."""
-    if run is not None and run.strict:
-        raise error
+def _unencodable(value, error):
+    """``{"$unencodable": ...}`` for ``error``."""
     try:
         text = repr(value)
     except Exception:
@@ -264,7 +255,7 @@ ALWAYS_WRITTEN = ("scope_start", "scope_end")
 class RunFilter(logging.Filter):
     """Resolves the Run-dependent parts of a record once, for all of the
     Run's handlers: Scope ids and the thread's Scope path, a Change's
-    default status, and the strict check of an invalid change call."""
+    default status."""
 
     def __init__(self, run):
         logging.Filter.__init__(self)
@@ -304,9 +295,6 @@ class RunFilter(logging.Filter):
                 data["status"] = "failed"
             else:
                 data["status"] = "planned" if self.run.mode == "dry" else "applied"
-        problem = data.pop("invalid", None)
-        if problem is not None and self.run.strict:
-            raise ValueError("invalid change call: " + problem)
         setattr(record, ATTR, data)
         setattr(record, RESOLVED_BY, self)
         return True
@@ -323,8 +311,7 @@ def _below(record, threshold):
 # --------------------------------------------------------------------------
 
 class JsonlHandler(logging.Handler):
-    """Writes one JSON object per line. Raises from ``emit`` only under
-    strict."""
+    """Writes one JSON object per line. Never raises from ``emit``."""
 
     def __init__(self, stream, run, level=logging.NOTSET):
         logging.Handler.__init__(self)
@@ -348,7 +335,6 @@ class JsonlHandler(logging.Handler):
         try:
             self.write_dict(_record_from_logrecord(record))
         except Exception:
-            _raise_if_strict(self.run)
             self.handleError(record)
 
 
@@ -416,7 +402,6 @@ class ConsoleHandler(logging.Handler):
             self._line(record.created, record.levelname, data.get("scope"),
                        body)
         except Exception:
-            _raise_if_strict(self.run)
             self.handleError(record)
 
     def _scope(self, data, exc_info):
@@ -507,14 +492,12 @@ def _old_new(entry):
     return entry
 
 
-class RunLogger(logging.LoggerAdapter):
+class TypedLogger(logging.LoggerAdapter):
     """Stdlib adapter: the usual methods plus ``fields=``, and the typed
-    calls ``change``, ``finding`` and ``scope``. ``run`` is the Run that
-    returned it, or None."""
+    calls ``change``, ``finding`` and ``scope``."""
 
-    def __init__(self, logger, run=None):
+    def __init__(self, logger):
         logging.LoggerAdapter.__init__(self, logger, {})
-        self.run = run
 
     def process(self, msg, kwargs):
         fields = kwargs.pop("fields", None)
@@ -543,7 +526,7 @@ class RunLogger(logging.LoggerAdapter):
         data = {"type": "change", "msg": msg, "table": table, "op": op}
         data.update(_given(key=key, label=label, changes=changes))
         data["status"] = status
-        data.update(_given(error=error, fields=fields, invalid=problem))
+        data.update(_given(error=error, fields=fields))
         self._typed(level, "%s %s" % (op, table), data, src)
         if problem is not None:
             self._typed(logging.WARNING, "invalid change call: " + problem,
@@ -568,13 +551,22 @@ class RunLogger(logging.LoggerAdapter):
         data["src"] = src
         self.logger.log(level, "%s", text, extra={ATTR: data})
 
+
+class RunLogger(TypedLogger):
+    """The adapter ``run()`` returns: a TypedLogger that also knows the
+    Run's mode."""
+
+    def __init__(self, logger, run):
+        TypedLogger.__init__(self, logger)
+        self.run = run
+
     @property
     def dry_run(self):
-        return self.run is not None and self.run.mode == "dry"
+        return self.run.mode == "dry"
 
     @property
     def write_run(self):
-        return self.run is not None and self.run.mode == "write"
+        return self.run.mode == "write"
 
 
 def get_logger(name):
@@ -583,7 +575,7 @@ def get_logger(name):
     It may be created at import time, before any Run is open: its records
     reach whichever Run is open when they are logged.
     """
-    return RunLogger(logging.getLogger(name))
+    return TypedLogger(logging.getLogger(name))
 
 
 # --------------------------------------------------------------------------
@@ -682,7 +674,7 @@ def _console_level(console):
 
 class _Run(object):
     def __init__(self, path, mode, title, description, target, fields,
-                 level, console, encoders, strict, max_text, overwrite):
+                 level, console, encoders, max_text, overwrite):
         if mode not in MODES:
             raise ValueError("mode must be 'dry' or 'write', got %r" % (mode,))
         self.path = path
@@ -694,7 +686,6 @@ class _Run(object):
         self.level = level
         self.console = console
         self.encoders = dict(encoders or {})
-        self.strict = strict
         self.max_text = max_text
         self.overwrite = overwrite
         self.filter = RunFilter(self)
@@ -781,11 +772,11 @@ class _Run(object):
 
 
 def run(path, *, mode, title=None, description=None, target=None, fields=None,
-        level=logging.DEBUG, console=logging.INFO, encoders=None, strict=False,
+        level=logging.DEBUG, console=logging.INFO, encoders=None,
         max_text=DEFAULT_MAX_TEXT, overwrite=False):
     """Open a Run: ``with dbfixlog.run(path, mode="dry") as log: ...``."""
     return _Run(path, mode, title, description, target, fields, level,
-                console, encoders, strict, max_text, overwrite)
+                console, encoders, max_text, overwrite)
 
 
 # Scope records go through this logger; without a handler of its own, the
