@@ -48,5 +48,35 @@ class ChangeAndFindingLineTest(ConsoleTestCase):
         ])
 
 
+class LevelTest(ConsoleTestCase):
+    def test_console_false_prints_nothing(self):
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            log.warning("careful")
+        self.assertEqual(self.lines(), [])
+
+    def test_console_warning_hides_info(self):
+        with dbfixlog.run(self.path, mode="dry",
+                          console=logging.WARNING) as log:
+            log.info("connected")
+            log.change("orders", "delete", key={"id": 1})
+            log.warning("careful")
+        self.assertLines([re.escape("WARNING careful")])
+
+    def test_console_below_file_level_still_sees_its_records(self):
+        with dbfixlog.run(self.path, mode="dry", level=logging.WARNING,
+                          console=logging.INFO) as log:
+            log.info("connected")
+        self.assertLines([re.escape("INFO  connected")])
+        with open(self.path, encoding="utf-8") as f:
+            self.assertNotIn("connected", f.read())
+
+    def test_handler_is_removed_after_the_run(self):
+        with dbfixlog.run(self.path, mode="dry"):
+            pass
+        logging.getLogger("after").warning("outside")
+        # Only stdlib's lastResort ("outside", no time prefix) may print.
+        self.assertEqual(self.lines(), ["outside"])
+
+
 if __name__ == "__main__":
     unittest.main()
