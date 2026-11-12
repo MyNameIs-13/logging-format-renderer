@@ -3,6 +3,8 @@
 Python 3.6.3+, stdlib only. See .scratch/db-fix-logging/SPEC.md.
 """
 
+import datetime
+import enum
 import functools
 import json
 import logging
@@ -32,25 +34,112 @@ def _active_run():
 
 
 # --------------------------------------------------------------------------
-# Value encoding seam (ticket 02 fills this in).
+# Value encoding (SPEC 3.5).
 # --------------------------------------------------------------------------
 
-def _encode(value, run=None):
-    """Return ``value`` in JSON-safe form.
+# Record slots that hold logged *values*: they get the full SPEC 3.5
+# encoding, including ``max_text`` truncation. Every other slot (msg,
+# Run Header fields, exc, ...) is only made JSON-safe.
+VALUE_SLOTS = ("key", "label", "fields", "changes")
+
+DEFAULT_MAX_TEXT = 1000
+BYTES_PREFIX = 64
+
+
+def _encode(value, run=None, truncate=True):
+    """Return ``value`` in JSON-safe form, for display (SPEC 3.5).
 
     This is the single place that turns a Python value into something
     ``json.dumps(..., allow_nan=False)`` accepts. ``run`` carries the
-    Run's ``encoders``, ``strict`` and ``max_text`` settings.
+    Run's ``encoders``, ``strict`` and ``max_text`` settings. With
+    ``truncate=False`` long text is kept whole (non-value slots).
+
+    A custom encoder (``encoders={Type: fn}``, matched along the value's
+    MRO) wins over the built-in rules. Its result is encoded again, by
+    the built-in rules alone if it has the same type as the input.
     """
-    if value is None or isinstance(value, (bool, int, str)):
+    fn = _custom_encoder(value, run)
+    if fn is not None:
+        try:
+            result = fn(value)
+        except Exception as e:
+            return _unencodable(value, e, run)
+        if type(result) is type(value):
+            return _builtin_encode(result, run, truncate)
+        return _encode(result, run, truncate)
+    return _builtin_encode(value, run, truncate)
+
+
+def _custom_encoder(value, run):
+    encoders = getattr(run, "encoders", None)
+    if not encoders:
+        return None
+    for cls in type(value).__mro__:
+        fn = encoders.get(cls)
+        if fn is not None:
+            return fn
+    return None
+
+
+def _builtin_encode(value, run, truncate):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, enum.Enum):
+        return _encode(value.value, run, truncate)
+    if isinstance(value, str):
+        limit = (getattr(run, "max_text", DEFAULT_MAX_TEXT) if run is not None
+                 else DEFAULT_MAX_TEXT)
+        if truncate and limit is not None and len(value) > limit:
+            return {"$truncated": value[:limit], "length": len(value)}
+        return value
+    if isinstance(value, int):
         return value
     if isinstance(value, float):
+        if value != value:
+            return "NaN"
+        if value in (float("inf"), float("-inf")):
+            return "Infinity" if value > 0 else "-Infinity"
         return value
+    if isinstance(value, (datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        data = bytes(value)
+        return {"$bytes": data[:BYTES_PREFIX].hex(), "length": len(data)}
     if isinstance(value, dict):
-        return {str(k): _encode(v, run) for k, v in value.items()}
+        return {str(k): _encode(v, run, truncate) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_encode(v, run) for v in value]
-    return str(value)
+        return [_encode(v, run, truncate) for v in value]
+    if isinstance(value, (set, frozenset)):
+        try:
+            items = sorted(value)
+        except TypeError:
+            items = list(value)
+        return [_encode(v, run, truncate) for v in items]
+    return _str_or_unencodable(value, run)
+
+
+def _str_or_unencodable(value, run):
+    try:
+        return str(value)
+    except Exception as e:
+        return _unencodable(value, e, run)
+
+
+def _unencodable(value, error, run):
+    """``{"$unencodable": ...}`` for ``error``; re-raises it under strict."""
+    if run is not None and run.strict:
+        raise error
+    try:
+        text = repr(value)
+    except Exception:
+        text = "%s: %s" % (type(error).__name__, error)
+    return {"$unencodable": text}
+
+
+def _encode_record(rec, run=None):
+    """Encode a whole record dict: value slots fully, the rest JSON-safe."""
+    return {k: _encode(v, run, truncate=k in VALUE_SLOTS)
+            for k, v in rec.items()}
 
 
 # --------------------------------------------------------------------------
@@ -112,6 +201,9 @@ def _record_from_logrecord(record):
     data = dict(data)
     rtype = data.pop("type", "message")
     scope = data.pop("scope", None)
+    src = data.pop("src", None)
+    if src is None:
+        src = "%s:%d" % (os.path.basename(record.pathname), record.lineno)
     if "msg" in data:
         msg = data.pop("msg")
     else:
@@ -119,8 +211,7 @@ def _record_from_logrecord(record):
     exc_info = record.exc_info if record.exc_info and record.exc_info[0] else None
     return _build_record(
         record.created, record.levelname, record.name, rtype,
-        src="%s:%d" % (os.path.basename(record.pathname), record.lineno),
-        msg=msg, exc_info=exc_info, extra=data, scope=scope,
+        src=src, msg=msg, exc_info=exc_info, extra=data, scope=scope,
     )
 
 
@@ -137,7 +228,7 @@ class JsonlHandler(logging.Handler):
         self.run = run
 
     def write_dict(self, rec):
-        line = json.dumps(_encode(rec, self.run), ensure_ascii=False,
+        line = json.dumps(_encode_record(rec, self.run), ensure_ascii=False,
                           allow_nan=False, separators=(",", ":"))
         self.acquire()
         try:
@@ -150,12 +241,39 @@ class JsonlHandler(logging.Handler):
         try:
             self.write_dict(_record_from_logrecord(record))
         except Exception:
+            if self.run is not None and self.run.strict:
+                raise
             self.handleError(record)
 
 
 # --------------------------------------------------------------------------
 # Adapter returned by run().
 # --------------------------------------------------------------------------
+
+OPS = ("update", "insert", "delete")
+
+
+def _change_misuse(op, key, changes):
+    """What is wrong with a ``change(...)`` call (SPEC 4.3), or None."""
+    if op not in OPS:
+        return "unknown op %r (expected update, insert or delete)" % (op,)
+    if op == "update" and not changes:
+        return "update without changes"
+    if key is None and op != "insert":
+        return "%s without key" % op
+    if key is not None and not isinstance(key, dict):
+        return ("key must be a {column: value} object, got %s %r"
+                % (type(key).__name__, key))
+    return None
+
+
+def _old_new(entry):
+    """One ``changes`` entry: an ``(old, new)`` pair becomes
+    ``{"old": ..., "new": ...}``; anything else is written as given."""
+    if isinstance(entry, (tuple, list)) and len(entry) == 2:
+        return {"old": entry[0], "new": entry[1]}
+    return entry
+
 
 class RunLogger(logging.LoggerAdapter):
     """Stdlib adapter: the usual methods plus ``fields=``.
@@ -176,6 +294,59 @@ class RunLogger(logging.LoggerAdapter):
             kwargs["extra"] = extra
         return msg, kwargs
 
+    def change(self, table, op, *, key=None, label=None, changes=None,
+               msg=None, status=None, error=None, level=None, fields=None):
+        """Log one row operation as a Change (SPEC 3.3, 4.3)."""
+        run = _active_run()
+        src = _caller(1)[0]
+        problem = _change_misuse(op, key, changes)
+        if problem is not None and run is not None and run.strict:
+            raise ValueError("invalid change call: " + problem)
+        if status is None:
+            if error is not None:
+                status = "failed"
+            elif run is not None:
+                status = "planned" if run.mode == "dry" else "applied"
+        if error is not None:
+            # The exception itself becomes ``str()`` at write time, through
+            # _encode, so a raising __str__ never escapes the call.
+            error = {"type": type(error).__name__, "message": error}
+        data = {"type": "change", "msg": msg, "table": table, "op": op}
+        if isinstance(changes, dict):
+            changes = {f: _old_new(v) for f, v in changes.items()}
+        for k, v in (("key", key), ("label", label), ("changes", changes),
+                     ("status", status), ("error", error), ("fields", fields)):
+            if v is not None:
+                data[k] = v
+        if level is None:
+            level = logging.ERROR if status == "failed" else logging.INFO
+        self._typed(level, "%s %s" % (op, table), data, src)
+        if problem is not None:
+            self._typed(logging.WARNING, "invalid change call: " + problem,
+                        {}, src)
+
+    def finding(self, check, msg=None, *, table=None, key=None, label=None,
+                level=logging.WARNING, fields=None):
+        """Log a Finding: ``check`` is the stable rule name (SPEC 3.3, 4.3)."""
+        data = {"type": "finding", "msg": msg, "check": check}
+        for k, v in (("table", table), ("key", key), ("label", label),
+                     ("fields", fields)):
+            if v is not None:
+                data[k] = v
+        text = check if msg is None else "%s: %s" % (check, msg)
+        self._typed(level, text, data, _caller(1)[0])
+
+    def scope(self, kind, *, key=None, label=None, msg=None, fields=None):
+        """Open a Scope stamped with this logger's name (SPEC 3.4, 4.3)."""
+        return _Scope(kind, key, label, msg, fields, _caller(1)[0],
+                      self.logger.name)
+
+    def _typed(self, level, text, data, src):
+        # Typed methods live in this file, so findCaller would stamp
+        # dbfixlog.py: the caller's src is passed through ATTR instead.
+        data["src"] = src
+        self.logger.log(level, "%s", text, extra={ATTR: data})
+
     @property
     def dry_run(self):
         run = _active_run()
@@ -185,6 +356,15 @@ class RunLogger(logging.LoggerAdapter):
     def write_run(self):
         run = _active_run()
         return run is not None and run.mode == "write"
+
+
+def get_logger(name):
+    """The adapter for helper modules: ``log = dbfixlog.get_logger(__name__)``.
+
+    It finds the active Run at call time, so it may be created at import
+    time, before any Run is open.
+    """
+    return RunLogger(logging.getLogger(name))
 
 
 # --------------------------------------------------------------------------
