@@ -21,7 +21,7 @@ The machine-readable record of one Run, starting with a Run Header.
 _Avoid_: log, trace
 
 **Run Header**:
-The first record of a Log File, identifying the format version and describing the Run.
+The first record of a Log File, identifying the format version, stating whether the Run is a Dry Run or a Write Run, and describing the Run.
 _Avoid_: preamble, metadata line
 
 **Report**:

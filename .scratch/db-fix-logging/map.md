@@ -28,10 +28,11 @@ A spec, ready to hand off for building, for (1) a Python stdlib-`logging`-based 
 - [Record schema for Message, Finding, Change](issues/03-record-schema.md): flat JSON records (`ts`, `level`, `logger`, `type`, `src`, `msg`, `scope`, `fields`, `exc`); one Change per row operation (`op` update/insert/delete, `changes` old/new map, final `status`); rows identified by `key` + human `label`; order = line position
 - [Serialization of database values](issues/04-value-serialization.md): display-only plain JSON (Decimal as string, ISO dates, Uniface date strings as received), `$truncated`/`$bytes`/`$unencodable` markers, no NULL-vs-empty guarantee, logging never raises
 - [Scope model](issues/05-scope-model.md): `scope_start`/`scope_end` records (`id`, `kind`, optional `key`/`label`; end has `outcome` ok/error + `exc` + `duration_ms`), id path `scope: [1,2]` on every record; phases allowed, no merging, always written regardless of level, missing end = unfinished
+- [Run Header contents](issues/06-run-header.md): `run_start` (`format` "1.0", required `mode` dry/write, optional `title`/`description`/`target`/`fields`, no automatic context or run id) and `run_end` (`outcome` ok/error/interrupted, `duration_ms`, `exit_code`; missing = unfinished), both always written
 
 ## Not yet specified
 
-- **Dry Run vs Write Run comparison**: whether/how a Report can relate a Write Run to the Dry Run that preceded it (did everything planned get applied?). Hangs on the Run Header (run identity); Changes could be matched by `table` + `key`/`label` + `op` (see Record schema).
+- **Dry Run vs Write Run comparison**: whether/how a Report can relate a Write Run to the Dry Run that preceded it (did everything planned get applied?). There is no run identity (see Run Header contents), so matching would go by Changes alone, by `table` + `key`/`label` + `op` (see Record schema).
 - **Rich content in records**: tables, links, code/SQL blocks beyond text and key/value fields. Revisit once the Record schema and Report layout show whether it's missed.
 - **Package layout & CLI**: package name, `render` command options (output path, title, opening a browser), Python version support.
 

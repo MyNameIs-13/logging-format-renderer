@@ -15,3 +15,5 @@ Context: see the Answer of 03-record-schema.md (record fields, per-row Changes w
 Context: see the Answer of 04-value-serialization.md (`$truncated`/`$bytes`/`$unencodable` markers, `null` vs `""` shown distinctly, values displayed as logged).
 
 Context: see the Answer of 05-scope-model.md (`scope_start`/`scope_end` records, `scope` id path on every record, outcome `ok`/`error`/unfinished, derived per-Scope summaries, Scope headers never hidden by the level filter).
+
+Context: see the Answer of 06-run-header.md (Run Header fields to summarise: `mode`, `title`, `description`, `target`, `fields`; `run_end` outcome/duration or *unfinished*; warnings for Change statuses that don't fit the mode; newer-minor-format notice).
