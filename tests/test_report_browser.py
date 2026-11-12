@@ -66,7 +66,7 @@ FILTER_PROBE = """(() => {
   $("[data-mode=flat]").click();
   out.acmeFlat = rows();
   $("[data-mode=tree]").click();
-  const link = $("[data-q]");
+  const link = $(".notices [data-q]");  // strip or notice link, not a summary card number
   if (link) { link.click(); out.link = {q: q.value, rows: rows()}; }
   return JSON.stringify(out);
 })()"""
