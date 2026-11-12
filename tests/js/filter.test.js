@@ -91,10 +91,10 @@ test("type, table, op, status, check, logger terms", () => {
   assert.deepStrictEqual(flat("logger:fix"), [1, 2, 3, 4, 5, 6, 8, 9, 10, 11]);
 });
 
-test("table: also finds a schema-qualified table", () => {
+test("table: matches the table field exactly, ignoring case", () => {
   const m = R.buildModel(payload([START(), rec("change", { op: "delete", table: "shop.orders", key: { id: 1 }, status: "planned" }), END]));
-  assert.deepStrictEqual(R.filterRows(m, { q: "table:orders" }, "flat").rows, [1]);
-  assert.deepStrictEqual(R.filterRows(m, { q: "table:shop.orders" }, "flat").rows, [1]);
+  assert.deepStrictEqual(R.filterRows(m, { q: "table:orders" }, "flat").rows, []);
+  assert.deepStrictEqual(R.filterRows(m, { q: "table:Shop.Orders" }, "flat").rows, [1]);
 });
 
 test("key:, kind: and in: include the enclosing Scopes", () => {
@@ -102,7 +102,8 @@ test("key:, kind: and in: include the enclosing Scopes", () => {
   assert.deepStrictEqual(flat("key:42"), [3, 4, 5, 6]);
   assert.deepStrictEqual(flat("key:id=43"), [8, 9, 10]);
   assert.deepStrictEqual(flat("kind:customer"), [3, 4, 5, 6, 8, 9, 10, 11]);
-  assert.deepStrictEqual(flat("kind:orphan-check"), [2, 3, 4, 5, 6, 8, 9, 10, 11]);
+  // A Scope's own header and end records match on its own kind only.
+  assert.deepStrictEqual(flat("kind:orphan-check"), [2, 4, 5, 6, 9]);
   assert.deepStrictEqual(flat("in:2"), [3, 4, 5, 6]);
   assert.deepStrictEqual(flat("in:3"), [8, 9, 10]);
   assert.deepStrictEqual(flat("in:2,4"), [3, 4, 5, 6, 11]);

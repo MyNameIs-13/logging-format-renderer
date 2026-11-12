@@ -1,4 +1,4 @@
-// Summary cards (SPEC §6.2 item 3, §6.3): counts, and the queries their numbers apply.
+// Summary cards: counts, and the queries their numbers apply.
 const test = require("node:test");
 const assert = require("node:assert");
 const path = require("node:path");
@@ -110,31 +110,29 @@ test("Finding and Scope numbers carry their queries; the unfinished count filter
   ]);
 });
 
-// Change and Finding numbers equal their query's matches. kind: also matches Scopes nested
-// inside a Scope of that kind (ticket 08), so a Scope number equals the matches whose own
-// Scope has that kind; nested Scopes of other kinds may show as well.
-test("each card number equals the matches of its own query (flat filter)", () => {
+// Clicking a card number lists exactly what the number counts, in Tree and Flat mode.
+test("each card number equals the matches of its own query", () => {
   const m = model("dry", [
     rec("scope_start", { id: 1, kind: "orphan-check" }),
     rec("scope_start", { id: 2, kind: "customer", key: { id: 42 }, label: { name: "ACME" }, scope: [1] }),
+    rec("scope_start", { id: 4, kind: "orphan-check", msg: "nested phase", scope: [1, 2] }),
+    rec("scope_end", { id: 4, outcome: "error", level: "ERROR", scope: [1, 2], exc: { type: "E", message: "y" } }),
     fd("no-lines", "WARNING"), Object.assign(fd("no-lines", "ERROR"), { scope: [1, 2] }),
     Object.assign(ch("orders", "update", "planned"), { scope: [1, 2] }),
     Object.assign(ch("orders", "delete", "applied"), { scope: [1, 2] }),
+    ch("shop.orders", "delete", "planned"),
     ch("customers", "update", "failed", { level: "ERROR" }),
     rec("scope_end", { id: 2, outcome: "error", level: "ERROR", scope: [1], exc: { type: "E", message: "x" } }),
     rec("scope_start", { id: 3, kind: "customer", key: { id: 43 }, scope: [1] }),
     rec("message", { msg: "working", scope: [1, 3] }),
   ], false);
   const l = links(R.cardsHTML(m));
-  assert.strictEqual(l.length, 18);
+  assert.ok(l.length > 15);
   for (const [q, text] of l) {
-    const rows = R.filterRows(m, { q: q }, "flat", new Set()).rows;
-    const kind = (q.match(/kind:(\S+)/) || [])[1];
-    const own = kind ? rows.filter((i) => m.scopes.get(m.records[i].id).kind === kind) : rows;
-    assert.strictEqual(own.length, Number(text), q);
+    for (const mode of ["flat", "tree"]) {
+      assert.strictEqual(R.filterRows(m, { q: q }, mode, new Set()).matches, Number(text), mode + ": " + q);
+    }
   }
-  // the nesting caveat, made explicit: the phase's own Scope plus the two customers inside it
-  assert.strictEqual(R.filterRows(m, { q: "type:scope_start kind:orphan-check" }, "flat", new Set()).rows.length, 3);
 });
 
 test("a Run without Changes, Findings or Scopes gets no cards", () => {

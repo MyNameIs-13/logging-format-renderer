@@ -499,14 +499,6 @@ function compileFilter(m, state) {
 
 function lc(v) { return typeof v === "string" ? v.toLowerCase() : v === undefined || v === null ? "" : String(v).toLowerCase(); }
 
-function tableMatches(set, table) {
-  const t = lc(table);
-  if (!t) return false;
-  if (set.has(t)) return true;
-  const dot = t.lastIndexOf("."); // table:orders also finds shop.orders
-  return dot >= 0 && set.has(t.slice(dot + 1));
-}
-
 // The Scopes a row sits in for matching: its scope path, plus the Scope itself for that
 // Scope's own start (header) and end records.
 function rowScopes(r) {
@@ -532,7 +524,7 @@ function matchRow(m, i, F) {
   if (header) {
     if (F.tables || F.ops || F.statuses || F.checks || F.fields.length) return false;
   } else {
-    if (F.tables && !tableMatches(F.tables, r.table)) return false;
+    if (F.tables && !F.tables.has(lc(r.table))) return false;
     if (F.ops && !F.ops.has(lc(r.op))) return false;
     if (F.statuses && !F.statuses.has(lc(r.status))) return false;
     if (F.checks && !F.checks.has(lc(r.check))) return false;
@@ -553,8 +545,11 @@ function matchRow(m, i, F) {
     if (!any) return false;
   }
   if (F.kinds) {
+    // A Scope's own records match on its own kind, so kind:K lists exactly the Scopes of
+    // kind K; any other record matches on the kinds of the Scopes it sits in.
     let any = false;
-    for (const id of sc) if (F.scopeKind.has(id)) { any = true; break; }
+    if (r.type === "scope_start" || r.type === "scope_end") any = F.scopeKind.has(r.id);
+    else for (const id of sc) if (F.scopeKind.has(id)) { any = true; break; }
     if (!any) return false;
   }
   if (F.keys.length) {
