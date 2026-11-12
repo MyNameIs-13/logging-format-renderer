@@ -1,0 +1,10 @@
+{"ts":"2026-11-12T20:01:00.000Z","level":"INFO","logger":"dbfixlog","type":"run_start","format":"1.0","mode":"dry","title":"Orphaned orders cleanup","description":"TICKET-123","target":{"database":"shop_prod"}}
+{"ts":"2026-11-12T20:01:00.120Z","level":"INFO","logger":"cleanup","type":"message","src":"cleanup.py:12","msg":"connected","fields":{"server":"db1"}}
+{"ts":"2026-11-12T20:01:00.200Z","level":"INFO","logger":"cleanup","type":"scope_start","src":"cleanup.py:20","id":1,"kind":"orphan-check","msg":"pass 1"}
+{"ts":"2026-11-12T20:01:00.250Z","level":"INFO","logger":"cleanup","type":"scope_start","src":"cleanup.py:31","id":2,"kind":"customer","key":{"id":42},"label":{"name":"ACME"},"scope":[1]}
+{"ts":"2026-11-12T20:01:00.270Z","level":"WARNING","logger":"cleanup","type":"finding","src":"cleanup.py:40","check":"order-without-lines","table":"orders","key":{"id":156},"label":{"barcode":"A88f"},"scope":[1,2]}
+{"ts":"2026-11-12T20:01:00.280Z","level":"INFO","logger":"cleanup","type":"change","src":"cleanup.py:44","op":"delete","table":"orders","key":{"id":156},"label":{"barcode":"A88f"},"status":"planned","scope":[1,2]}
+{"ts":"2026-11-12T20:01:00.288Z","level":"INFO","logger":"cleanup","type":"change","src":"cleanup.py:52","op":"update","table":"customers","key":{"id":42},"changes":{"note":{"old":null,"new":"cleaned <b>&amp;</b> </script> ünïcode"}},"status":"planned","scope":[1,2]}
+{"ts":"2026-11-12T20:01:00.290Z","level":"INFO","logger":"cleanup","type":"scope_end","src":"cleanup.py:31","id":2,"outcome":"ok","duration_ms":40,"scope":[1]}
+{"ts":"2026-11-12T20:01:00.320Z","level":"INFO","logger":"cleanup","type":"scope_end","src":"cleanup.py:20","id":1,"outcome":"ok","duration_ms":120}
+{"ts":"2026-11-12T20:03:12.418Z","level":"INFO","logger":"dbfixlog","type":"run_end","outcome":"ok","duration_ms":132418}
