@@ -578,6 +578,129 @@ function viewCounts(m) {
 }
 
 // ---------------------------------------------------------------------------------------
+// Summary cards (ticket 09; pure)
+// ---------------------------------------------------------------------------------------
+// summaryCounts(m) -> {changes, findings, kinds}:
+//   changes:  {rows: [{table, op, planned, applied, failed, all}], total: {planned, applied, failed, all}}
+//             one row per table x op, sorted by table, then update/insert/delete, then other ops.
+//   findings: {levels: [LEVEL names that occur, by severity], rows: [{check, all, <LEVEL>: n}]}, by check.
+//   kinds:    [{kind, n, error, unfinished}] in the order kinds first appear.
+const CHANGE_STATUSES = ["planned", "applied", "failed"];
+const CHANGE_OPS = ["update", "insert", "delete"];
+
+function summaryCounts(m) {
+  const changes = new Map();
+  const total = { planned: 0, applied: 0, failed: 0, all: 0 };
+  const checks = new Map();
+  const levels = new Set();
+  for (let i = 0; i < m.records.length; i++) {
+    const r = m.records[i];
+    if (r.type === "change") {
+      const table = textOf(r.table);
+      const op = textOf(r.op);
+      const id = table + "\u0000" + op;
+      let row = changes.get(id);
+      if (!row) changes.set(id, row = { table: table, op: op, planned: 0, applied: 0, failed: 0, all: 0 });
+      row.all++;
+      total.all++;
+      if (CHANGE_STATUSES.indexOf(r.status) >= 0) { row[r.status]++; total[r.status]++; }
+    } else if (r.type === "finding") {
+      const check = textOf(r.check);
+      const level = String(r.level || "").toUpperCase();
+      let row = checks.get(check);
+      if (!row) checks.set(check, row = { check: check, all: 0 });
+      row.all++;
+      row[level] = (row[level] || 0) + 1;
+      levels.add(level);
+    }
+  }
+  const opRank = (op) => { const k = CHANGE_OPS.indexOf(op); return k < 0 ? CHANGE_OPS.length : k; };
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  const crows = Array.from(changes.values()).sort((a, b) =>
+    cmp(a.table, b.table) || opRank(a.op) - opRank(b.op) || cmp(a.op, b.op));
+  const lv = Array.from(levels).sort((a, b) => (LEVELS[a] || 99) - (LEVELS[b] || 99) || cmp(a, b));
+  const frows = Array.from(checks.values()).sort((a, b) => cmp(a.check, b.check));
+  for (const row of frows) for (const l of lv) row[l] = row[l] || 0;
+  const kinds = new Map();
+  for (const s of m.scopes.values()) {
+    const kind = textOf(s.kind);
+    let k = kinds.get(kind);
+    if (!k) kinds.set(kind, k = { kind: kind, n: 0, error: 0, unfinished: 0 });
+    k.n++;
+    if (s.outcome === "error") k.error++;
+    else if (s.outcome === "unfinished") k.unfinished++;
+  }
+  return { changes: { rows: crows, total: total }, findings: { levels: lv, rows: frows }, kinds: Array.from(kinds.values()) };
+}
+
+// A query value, quoted when it holds whitespace (queryTokens groups on double quotes).
+// An empty value yields no term at all ("table:" would be a plain word).
+function queryTerm(key, v) {
+  const s = String(v).replace(/"/g, "");
+  if (!s) return "";
+  return key + ":" + (/\s/.test(s) ? '"' + s + '"' : s);
+}
+function joinTerms(terms) { return terms.filter(Boolean).join(" "); }
+
+// A clickable card number: a [data-q] link (the click handler in renderReport sends it to
+// filter.query). Zero is plain dim text, not a link.
+function cardNum(n, q, red) {
+  if (!n) return '<td class="num"><span class="dim">0</span></td>';
+  return '<td class="num"><a href="#" class="cn' + (red ? " red" : "") + '" data-q="' + esc(q) + '">' +
+    n.toLocaleString("en") + "</a></td>";
+}
+
+// The foldable summary cards (SPEC §6.2 item 3), or "" when there is nothing to count.
+// Failed Changes are red when non-zero; applied ones too in a Dry Run.
+function cardsHTML(m) {
+  const c = summaryCounts(m);
+  const dry = m.mode === "dry";
+  const redStatus = (s) => s === "failed" || (s === "applied" && dry);
+  const cards = [];
+  if (c.changes.rows.length) {
+    const head = "<tr><th>table</th><th>op</th>" + CHANGE_STATUSES.map((s) => "<th>" + s + "</th>").join("") + "<th>all</th></tr>";
+    let prev = null;
+    const body = c.changes.rows.map((r) => {
+      const base = ["type:change", queryTerm("table", r.table), queryTerm("op", r.op)];
+      const h = '<tr><td class="mono">' + (r.table === prev ? "" : esc(r.table)) + '</td><td>' + esc(r.op) + "</td>" +
+        CHANGE_STATUSES.map((s) => cardNum(r[s], joinTerms(base.concat([queryTerm("status", s)])), redStatus(s))).join("") +
+        cardNum(r.all, joinTerms(base), false) + "</tr>";
+      prev = r.table;
+      return h;
+    }).join("");
+    const t = c.changes.total;
+    const foot = '<tr class="tot"><td>all</td><td></td>' +
+      CHANGE_STATUSES.map((s) => cardNum(t[s], "type:change status:" + s, redStatus(s))).join("") +
+      cardNum(t.all, "type:change", false) + "</tr>";
+    cards.push('<div class="card" data-card="changes"><h4>Changes</h4><table>' + head + body + foot + "</table></div>");
+  }
+  if (c.findings.rows.length) {
+    const lv = c.findings.levels;
+    const head = "<tr><th>check</th>" + lv.map((l) => "<th>" + esc(l.toLowerCase()) + "</th>").join("") + "<th>all</th></tr>";
+    const body = c.findings.rows.map((r) => {
+      const ck = queryTerm("check", r.check);
+      return '<tr><td class="mono">' + esc(r.check) + "</td>" +
+        lv.map((l) => cardNum(r[l], joinTerms([ck, queryTerm("level", l.toLowerCase())]), levelValue(l) >= LEVELS.ERROR)).join("") +
+        cardNum(r.all, ck, false) + "</tr>";
+    }).join("");
+    cards.push('<div class="card" data-card="findings"><h4>Findings</h4><table>' + head + body + "</table></div>");
+  }
+  if (c.kinds.length) {
+    const head = "<tr><th>kind</th><th>Scopes</th><th>error</th><th>unfinished</th></tr>";
+    const body = c.kinds.map((k) => {
+      const kd = queryTerm("kind", k.kind);
+      return '<tr><td class="mono">' + esc(k.kind) + "</td>" +
+        cardNum(k.n, joinTerms(["type:scope_start", kd]), false) +
+        cardNum(k.error, joinTerms(["type:scope_end", kd]), true) +
+        cardNum(k.unfinished, joinTerms(["is:unfinished", kd]), false) + "</tr>";
+    }).join("");
+    cards.push('<div class="card" data-card="scopes"><h4>Scopes</h4><table>' + head + body + "</table></div>");
+  }
+  if (!cards.length) return "";
+  return '<details class="cards" open><summary>Summary</summary><div class="cardrow">' + cards.join("") + "</div></details>";
+}
+
+// ---------------------------------------------------------------------------------------
 // Cells (pure; return HTML strings)
 // ---------------------------------------------------------------------------------------
 
@@ -1326,7 +1449,7 @@ function renderReport(doc, app, payload) {
   const m = buildModel(payload);
   app.innerHTML = '<div class="report">' + runHeaderHTML(m) +
     '<div class="notices">' + noticesHTML(m) + "</div>" +
-    '<div id="cards"></div><div id="bar"></div>' + // slots: summary cards (09), filter bar (08)
+    '<div id="cards">' + cardsHTML(m) + '</div><div id="bar"></div>' + // filter bar slot (08)
     '<div class="listwrap"></div></div>';
   const list = createList(doc, app.querySelector(".listwrap"), m);
   const filter = createFilterBar(doc, app.querySelector("#bar"), list, m, app.querySelector(".listwrap .list"));
@@ -1370,4 +1493,6 @@ if (typeof module !== "undefined") module.exports = {
   parseQuery, compileFilter, matchRow, filterRows, viewCounts, VIEWS,
   // ticket 10
   foldSet, stickyScopes, loadWidths, saveWidths, WIDTHS_KEY, DEFAULT_WIDTHS,
+  // ticket 09
+  summaryCounts, cardsHTML,
 };

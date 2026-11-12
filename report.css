@@ -135,3 +135,20 @@ td { padding: 1px 8px 1px 0; text-align: left; vertical-align: top; }
 .qhelp-body p { margin: 4px 0; }
 .qhelp-body code { font: 11.5px var(--mono); }
 .qhelp-body td { padding: 1px 12px 1px 0; }
+
+/* Summary cards (ticket 09): foldable, open by default; every non-zero number is a [data-q] link. */
+#cards:empty { display: none; }
+.cards { padding: 6px 14px 8px; border-bottom: 1px solid var(--line); }
+.cards > summary { cursor: pointer; font: 600 12px system-ui; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+.cardrow { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; align-items: flex-start; }
+.card { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; max-width: 100%; overflow-x: auto; }
+.card h4 { margin: 0 0 4px; font: 600 11px system-ui; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); }
+.card table { border-collapse: collapse; font-size: 12px; }
+.card th { font: 600 11px system-ui; color: var(--dim); text-align: right; padding: 1px 6px; }
+.card th:first-child, [data-card=changes] th:nth-child(2) { text-align: left; }
+.card td { padding: 1px 6px; white-space: nowrap; }
+.card td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.card tr.tot td { border-top: 1px solid var(--line); color: var(--dim); }
+.card a.cn { color: var(--acc); text-decoration: none; padding: 0 3px; border-radius: 3px; }
+.card a.cn:hover { background: var(--sel); text-decoration: underline; }
+.card a.cn.red { color: var(--err); font-weight: 600; }
