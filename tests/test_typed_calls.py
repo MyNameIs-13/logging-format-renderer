@@ -134,5 +134,62 @@ class ChangeTest(TypedCallTestCase):
                          {"$truncated": "abc", "length": 6})
 
 
+class ChangeMisuseTest(TypedCallTestCase):
+    CASES = [
+        ("unknown op", ("orders", "upsert"), {"key": {"id": 1}}, "op"),
+        ("update without changes", ("orders", "update"), {"key": {"id": 1}},
+         "changes"),
+        ("missing key on delete", ("orders", "delete"), {}, "key"),
+        ("missing key on update", ("orders", "update"),
+         {"changes": {"a": (1, 2)}}, "key"),
+        ("scalar key", ("orders", "delete"), {"key": 156}, "key"),
+    ]
+
+    def test_misuse_writes_record_then_warning(self):
+        for name, args, kwargs, word in self.CASES:
+            with self.subTest(name):
+                with dbfixlog.run(self.path, mode="dry", console=False,
+                                  overwrite=True) as log:
+                    log.change(*args, **kwargs)  # MARK-misuse
+                change, warning = self.body()
+                self.assertEqual(change["type"], "change")
+                self.assertEqual(change["table"], args[0])
+                self.assertEqual(change["op"], args[1])
+                if "key" in kwargs:
+                    self.assertEqual(change["key"], kwargs["key"])
+                else:
+                    self.assertNotIn("key", change)
+                self.assertEqual(warning["type"], "message")
+                self.assertEqual(warning["level"], "WARNING")
+                self.assertEqual(warning["logger"], "__main__")
+                self.assertTrue(
+                    warning["msg"].startswith("invalid change call: "),
+                    warning["msg"])
+                self.assertIn(word, warning["msg"])
+                src = "%s:%d" % (THIS_FILE, lineno_of("MARK-misuse"))
+                self.assertEqual(change["src"], src)
+                self.assertEqual(warning["src"], src)
+
+    def test_misuse_raises_under_strict(self):
+        for name, args, kwargs, _ in self.CASES:
+            with self.subTest(name):
+                with dbfixlog.run(self.path, mode="dry", console=False,
+                                  strict=True, overwrite=True) as log:
+                    with self.assertRaises(ValueError) as cm:
+                        log.change(*args, **kwargs)
+                self.assertIn("invalid change call", str(cm.exception))
+                self.assertEqual(self.body(), [])
+
+    def test_valid_calls_write_no_warning(self):
+        with dbfixlog.run(self.path, mode="dry", console=False,
+                          strict=True) as log:
+            log.change("orders", "insert", label={"no": "B1"})
+            log.change("orders", "insert", key={"id": 9})
+            log.change("orders", "update", key={"id": 1},
+                       changes={"a": (1, 1)})
+            log.change("orders", "delete", key={"order_id": 7, "line_no": 3})
+        self.assertEqual([r["type"] for r in self.body()], ["change"] * 4)
+
+
 if __name__ == "__main__":
     unittest.main()

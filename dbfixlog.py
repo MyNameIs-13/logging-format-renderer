@@ -250,6 +250,23 @@ class JsonlHandler(logging.Handler):
 # Adapter returned by run().
 # --------------------------------------------------------------------------
 
+OPS = ("update", "insert", "delete")
+
+
+def _change_misuse(op, key, changes):
+    """What is wrong with a ``change(...)`` call (SPEC 4.3), or None."""
+    if op not in OPS:
+        return "unknown op %r (expected update, insert or delete)" % (op,)
+    if op == "update" and not changes:
+        return "update without changes"
+    if key is None and op != "insert":
+        return "%s without key" % op
+    if key is not None and not isinstance(key, dict):
+        return ("key must be a {column: value} object, got %s %r"
+                % (type(key).__name__, key))
+    return None
+
+
 def _old_new(entry):
     """One ``changes`` entry: an ``(old, new)`` pair becomes
     ``{"old": ..., "new": ...}``; anything else is written as given."""
@@ -281,6 +298,10 @@ class RunLogger(logging.LoggerAdapter):
                msg=None, status=None, error=None, level=None, fields=None):
         """Log one row operation as a Change (SPEC 3.3, 4.3)."""
         run = _active_run()
+        src = _caller(1)[0]
+        problem = _change_misuse(op, key, changes)
+        if problem is not None and run is not None and run.strict:
+            raise ValueError("invalid change call: " + problem)
         if status is None:
             if error is not None:
                 status = "failed"
@@ -299,7 +320,10 @@ class RunLogger(logging.LoggerAdapter):
                 data[k] = v
         if level is None:
             level = logging.ERROR if status == "failed" else logging.INFO
-        self._typed(level, "%s %s" % (op, table), data, _caller(1)[0])
+        self._typed(level, "%s %s" % (op, table), data, src)
+        if problem is not None:
+            self._typed(logging.WARNING, "invalid change call: " + problem,
+                        {}, src)
 
     def _typed(self, level, text, data, src):
         # Typed methods live in this file, so findCaller would stamp
