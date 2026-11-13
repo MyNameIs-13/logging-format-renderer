@@ -15,7 +15,7 @@ FORBIDDEN = re.compile(r"(?<![A-Za-z])(spec|tickets?)(?![A-Za-z])|§", re.IGNORE
 
 # JS and CSS comments; a "//" right after ":" (a URL) is not a comment.
 JS_COMMENT = re.compile(r"/\*.*?\*/|(?<![:\\])//[^\n]*", re.DOTALL)
-# Test titles in node:test files: test("...", ...).
+# Test titles in JS test files: test("...", ...).
 JS_TEST_NAME = re.compile(r"""\btest\(\s*(["'`])(.*?)\1""")
 
 

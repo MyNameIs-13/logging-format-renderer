@@ -20,10 +20,8 @@ Implementation tickets for [SPEC.md](../SPEC.md). They form a task graph. A tick
 
 - **Files at the repo root:** `dbfixlog.py`, `dbfixlog_render.py`, `report.js`, `report.css`. Tests go in `tests/`.
 - **Python tests:** stdlib `unittest` only, run with `python3 -m unittest discover -s tests`. There is no pytest and no third-party package.
-- **JS logic tests:**
-  - `node --test tests/js/*.test.js` (a bare `tests/js/` directory argument fails on Node 24).
-  - `report.js` stays one plain script with no modules and no build step. Pure functions (query parser, filters, model) are exposed for Node with `if (typeof module !== "undefined") module.exports = {...}`.
-- **Browser checks:** headless Firefox (`firefox --headless`) on a rendered Report opened from `file://`.
+- **No test-only code in shipped files:** `dbfixlog.py`, `dbfixlog_render.py`, `report.js` and `report.css` carry nothing that exists only for tests (no exported functions, no globals, no timing hooks, no data attributes or environment variables that only tests read).
+- **Report tests:** `report.js` stays one plain script with no modules and no build step. Its behaviour is tested only in headless Firefox (`firefox --headless`) on rendered Reports opened from `file://`, driven through the DOM like a user (clicks, the search box, the level select) and reading what the page shows. The shared harness is `tests/browser_report.py`, and the WebDriver BiDi driver is `tests/browser/bidi_eval.mjs` (Node runs only that driver; there are no Node tests).
 - **Python 3.6.3 compatibility:** this machine has no 3.6 interpreter and no Docker. `tests/test_py36_compat.py` (added in ticket 01) parses both Python files and fails on known 3.7+ constructs and imports. Running the suite under real Python 3.6 is still owed (SPEC §2).
 - **Spec §9 gaps, settled by the user on 2026-11-12:**
   - The Report's Time column and `after:`/`before:` use **UTC** (the `hh:mm:ss.mmm` slice of `ts`, as in the prototype). There is no special handling for midnight.

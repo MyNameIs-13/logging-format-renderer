@@ -93,7 +93,6 @@ def _malformed_notice(bad):
     count = len(bad)
     return {
         "kind": "malformed_lines",
-        "count": count,
         "lines": [number for number, _ in bad],
         "samples": samples,
         "message": "{} skipped".format(_plural(count, "malformed line")),
@@ -212,7 +211,7 @@ def _check_format(header, log):
                            log, fmt, _known_majors()))
     known = "{}.{}".format(major, KNOWN_MINORS[major])
     if minor > KNOWN_MINORS[major]:
-        return {"kind": "newer_minor", "format": fmt, "reads": known,
+        return {"kind": "newer_minor",
                 "message": "Log File format {} is newer than {}, which this renderer knows; "
                            "newer fields may not be shown".format(fmt, known)}
     return None
@@ -249,10 +248,8 @@ def _render(args):
     title = _title(args.title, records[0], args.log_file)
     payload = {
         "payload": PAYLOAD_VERSION,
-        "renderer": __version__,
         "source": os.path.basename(args.log_file),
         "title": title,
-        "unfinished": not any(r.get("type") == "run_end" for r in records),
         "notices": notices,
         "records": records,
         "lines": lines,

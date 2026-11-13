@@ -32,6 +32,8 @@ td { padding: 1px 8px 1px 0; text-align: left; vertical-align: top; }
 .notices { padding: 6px 14px; border-bottom: 1px solid var(--line); }
 .strip, .notice { padding: 6px 10px; border-radius: 4px; margin: 4px 0; }
 .strip { font-size: 14px; padding: 9px 12px; }
+.notice .samples { margin: 4px 0 0; padding-left: 18px; }
+.notice .samples code { font: 11.5px var(--mono); white-space: pre-wrap; }
 [data-tone="amber"] { background: var(--amber-bg); border: 1px solid var(--amber-line); color: var(--amber-fg); }
 .notice[data-tone="red"] { background: #fde2e2; border: 1px solid #f3b4b4; }
 .strip[data-tone="red"] { background: var(--err); border: 1px solid var(--err); color: #fff; font-weight: 600; }

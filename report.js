@@ -14,10 +14,8 @@
 //
 //   {
 //     "payload":    1,              // shape version of this object; bumped on breaking change
-//     "renderer":   "0.1.0",        // dbfixlog_render.py __version__
 //     "source":     "run.jsonl",    // Log File name (basename)
 //     "title":      "...",          // resolved: --title, then run_start.title, then source
-//     "unfinished": false,          // true when no run_end record is present
 //     "notices":    [Notice, ...],  // render-time notices, in the order below; may be []
 //     "records":    [Record, ...],  // every well-formed record, in file order, verbatim
 //     "lines":      [1, 2, 4, ...]  // lines[i] = 1-based Log File line of records[i]
@@ -31,20 +29,16 @@
 // Every Notice has "kind" and a human-readable "message"; show the message for unknown
 // kinds. Known kinds:
 //
-//   {"kind": "newer_minor", "format": "1.7", "reads": "1.0", "message": "..."}
+//   {"kind": "newer_minor", "message": "..."}
 //       The Log File's minor format is newer than the renderer knows.
-//   {"kind": "malformed_lines", "count": 3, "lines": [3, 5, 7],
+//   {"kind": "malformed_lines", "lines": [3, 5, 7],
 //    "samples": [{"line": 3, "text": "not json"}, ...],   // first 5, each <= 200 chars
 //    "message": "3 malformed lines skipped"}
-//       Lines that were not JSON objects were skipped (only without --strict).
+//       Lines that were not JSON objects were skipped (only without --strict). The notice
+//       shows the line numbers and the samples.
 //   {"kind": "incomplete_last_line", "line": 10,
 //    "message": "last line incomplete, file may still be written"}
-//       The last line had no trailing newline and was skipped.
-//
-// The page also exposes its state for tests on <html>: data-state = "loading" | "ready" |
-// "error", data-record-count, and data-error (on error). Once ready, window.dbfixlogReport
-// is {model, list, filter, onQuery, timing} (see renderReport and startReport), which
-// the browser tests drive. timing = {decode, render, ready, nav} in ms; <html data-ready-ms> too.
+//       The last line had no trailing newline and did not parse, so it was skipped.
 // ---------------------------------------------------------------------------------------
 
 async function decodePayload(base64Text) {
@@ -82,7 +76,7 @@ function base64Bytes(text) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Model (pure; exported for Node)
+// Model (pure)
 // ---------------------------------------------------------------------------------------
 // buildModel(payload) derives everything the views need from the verbatim records.
 // A record's id is its index i into model.records. Per-record derived data lives in
@@ -254,8 +248,17 @@ function runNotices(m) {
   return out;
 }
 
+// A render-time notice: its message, plus the line numbers and first bad lines verbatim
+// for skipped lines, or the line number of an incomplete last line.
 function givenNotice(n) {
-  return { kind: n.kind, tone: "amber", text: String(n.message), source: n };
+  let text = String(n.message);
+  if (Array.isArray(n.lines) && n.lines.length) {
+    text += " (line" + (n.lines.length === 1 ? " " : "s ") + n.lines.slice(0, 20).join(", ") +
+      (n.lines.length > 20 ? ", …" : "") + ")";
+  } else if (typeof n.line === "number") {
+    text += " (line " + n.line + ")";
+  }
+  return { kind: n.kind, tone: "amber", text: text, samples: Array.isArray(n.samples) ? n.samples : [] };
 }
 
 // Time column and notices use UTC: the hh:mm:ss.mmm slice of ts.
@@ -308,7 +311,7 @@ function flatRows(m) {
 //   view:  "all" | "changes" | "findings" | "errors"   (default "all")
 //   q:     the search box text (default "")
 //   level: the level ≥ dropdown, a LEVELS name (default "DEBUG", meaning no level filter)
-// filterRows(m, state, mode, collapsed) returns {rows, active, matches, shown, ms}:
+// filterRows(m, state, mode, collapsed) returns {rows, active, matches, shown}:
 //   rows:    record indices to show, in file order
 //   active:  whether a filter is active; when false, rows are treeRows/flatRows
 //   matches: how many rows match the filter themselves (enclosing headers kept for the
@@ -587,11 +590,10 @@ function fieldsMatch(r, terms) {
 }
 
 function filterRows(m, state, mode, collapsed) {
-  const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
   const F = compileFilter(m, state);
   const coll = collapsed || new Set();
   const flat = mode === "flat";
-  const out = { rows: null, active: F.active, matches: 0, shown: null, filter: F, ms: 0 };
+  const out = { rows: null, active: F.active, matches: 0, shown: null };
   if (!F.active) {
     out.rows = flat ? flatRows(m) : treeRows(m, coll);
     out.matches = out.rows.length;
@@ -627,7 +629,6 @@ function filterRows(m, state, mode, collapsed) {
     out.matches = matches;
     out.shown = shown;
   }
-  out.ms = (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0;
   return out;
 }
 
@@ -1171,8 +1172,11 @@ function noticesHTML(m) {
       (s.q ? ' <a href="#" data-q="' + esc(s.q) + '">Show them</a>' : "") + "</div>";
   }
   for (const n of runNotices(m)) {
-    h += '<div class="notice" data-kind="' + esc(n.kind) + '" data-tone="' + n.tone + '">' + esc(n.text) +
-      (n.q ? ' <a href="#" data-q="' + esc(n.q) + '">show</a>' : "") + "</div>";
+    h += '<div class="notice" data-tone="' + n.tone + '">' + esc(n.text) +
+      (n.q ? ' <a href="#" data-q="' + esc(n.q) + '">show</a>' : "") +
+      (n.samples && n.samples.length ? '<ul class="samples">' + n.samples.map((x) =>
+        '<li><span class="dim">line ' + esc(x.line) + '</span> <code>' + esc(x.text) + "</code></li>").join("") +
+        "</ul>" : "") + "</div>";
   }
   return h;
 }
@@ -1409,12 +1413,11 @@ function installListTools(doc, app, report) {
 // ---------------------------------------------------------------------------------------
 // Filter bar (browser only). Views with counts, search box, level ≥, Tree/Flat.
 // ---------------------------------------------------------------------------------------
-// createFilterBar returns the filter API (window.dbfixlogReport.filter):
-//   get()          -> a copy of the state {view, q, level} (see filterRows)
+// createFilterBar returns the filter API:
 //   set(partial)   -> merges into the state, updates the controls and refreshes the list
 //   query(q)       -> shows exactly what q matches: view All, level DEBUG, search box q.
 //                     Notice links and summary-card numbers use this.
-//   last           -> the latest filterRows result {rows, active, matches, shown, ms}
+//   last           -> the latest filterRows result {rows, active, matches, shown}
 // It installs itself as list.rowSource and sets list.shown for "k of n shown".
 
 const VIEW_LABELS = { all: "All", changes: "Changes", findings: "Findings", errors: "Errors" };
@@ -1469,8 +1472,6 @@ function createFilterBar(doc, bar, list, m, listEl) {
   let timer = 0;
   const filter = {
     last: null,
-    indexMs: null,
-    get() { return Object.assign({}, state); },
     set(partial) {
       clearTimeout(timer);
       state = normState(Object.assign({}, state, partial));
@@ -1514,13 +1515,8 @@ function createFilterBar(doc, bar, list, m, listEl) {
     else if (e.key === "Escape") filter.set({ q: "" });
   });
   // Build the search index while idle, so the first keystroke doesn't pay for it.
-  // filter.indexMs records how long that took (read by the budget test).
   const idle = doc.defaultView.requestIdleCallback || ((f) => setTimeout(f, 50));
-  idle(() => {
-    const t0 = performance.now();
-    searchIndex(m);
-    filter.indexMs = performance.now() - t0;
-  });
+  idle(() => searchIndex(m));
   return filter;
 }
 
@@ -1550,34 +1546,13 @@ function renderReport(doc, app, payload) {
 }
 
 async function startReport(doc) {
-  const root = doc.documentElement;
   const app = doc.getElementById("app");
-  root.dataset.state = "loading";
-  const t0 = performance.now();
   try {
     const payload = await decodePayload(doc.getElementById("dbfixlog-payload").textContent);
-    const t1 = performance.now();
-    root.dataset.recordCount = String(payload.records.length);
-    const report = renderReport(doc, app, payload);
-    const t2 = performance.now();
-    // Data ready: decode + parse + model + first list render, in ms from the
-    // start of this function; nav is the same moment measured from navigation start.
-    report.timing = { decode: t1 - t0, render: t2 - t1, ready: t2 - t0, nav: t2 };
-    root.dataset.readyMs = String(Math.round(t2 - t0));
-    doc.defaultView.dbfixlogReport = report;
-    root.dataset.state = "ready";
+    renderReport(doc, app, payload);
   } catch (e) {
-    root.dataset.error = String(e);
     app.textContent = "Could not load the Report data: " + e;
-    root.dataset.state = "error";
   }
 }
 
-if (typeof document !== "undefined") startReport(document);
-if (typeof module !== "undefined") module.exports = {
-  decodePayload, buildModel, modeStrip, runNotices, isEntry, isHeader, isRow, treeRows, flatRows,
-  rowCells, rowClass, valueHTML, scopeName, hms, duration, esc, LEVELS, COLUMNS,
-  parseQuery, compileFilter, matchRow, filterRows, viewCounts, VIEWS,
-  foldSet, stickyScopes, loadWidths, saveWidths, WIDTHS_KEY, DEFAULT_WIDTHS,
-  summaryCounts, cardsHTML,
-};
+startReport(document);

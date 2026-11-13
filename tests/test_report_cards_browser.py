@@ -1,83 +1,160 @@
-"""Headless Firefox checks for the summary cards, and that clicking a card
-number filters the list.
-
-Reuses the Firefox lifecycle and probe helper of test_report_details_browser (without
-re-running its tests).
-"""
+"""Headless Firefox checks for the summary cards: their counts, and that clicking a
+number lists exactly what it counts."""
 import os
+import sys
 import unittest
 
-import test_report_browser as base
-import test_report_details_browser as details
-from test_report_browser import START, END, msg, change
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-_FF = base.StubReportInFirefox.__dict__  # not the classes themselves: unittest would collect them
-_DP = details.DetailsPanelInFirefox.__dict__
+from browser_report import (  # noqa: E402
+    END, START, FirefoxCase, msg, skip_without_browser)
 
 
-@unittest.skipIf(os.environ.get("DBFIXLOG_SKIP_BROWSER"), "DBFIXLOG_SKIP_BROWSER set")
-@unittest.skipUnless(base.FIREFOX and base.NODE, "needs firefox and node on PATH")
-class SummaryCardsInFirefox(unittest.TestCase):
-    setUpClass = _FF["setUpClass"]
-    tearDownClass = _FF["tearDownClass"]
-    _wait_for_bidi = _FF["_wait_for_bidi"]
-    render = _DP["render"]
-    probe = _DP["probe"]
+def ch(table, op, status, **extra):
+    r = msg("change", table=table, op=op, status=status, key={"id": 1})
+    if op == "update":
+        r["changes"] = {"a": {"old": 1, "new": 2}}
+    r.update(extra)
+    return r
 
-    # 0 start, 1 phase{ 2 customer{ 3 planned, 4 applied, 5 finding }, 6 customer{ unfinished
-    # 7 failed }, ... no run_end
-    def cards_report(self):
-        return self.render("cards", [
-            START("dry"),
-            msg("scope_start", id=1, kind="orphan-check"),
-            msg("scope_start", id=2, kind="customer", key={"id": 42}, scope=[1]),
-            change("planned", scope=[1, 2]),
-            change("applied", scope=[1, 2], table="customers"),
-            msg("finding", level="WARNING", check="no-lines", table="orders", key={"id": 1}, scope=[1, 2]),
-            msg("scope_end", id=2, outcome="ok", duration_ms=3, scope=[1]),
-            msg("scope_start", id=3, kind="customer", key={"id": 43}, scope=[1]),
-            change("failed", level="ERROR", error={"type": "E", "message": "x"}, scope=[1, 3]),
+
+def fd(check, level, **extra):
+    r = msg("finding", check=check, level=level, table="orders", key={"id": 1}, msg="m")
+    r.update(extra)
+    return r
+
+
+# Each card's body rows (cells joined by "|"), and every clickable number as
+# [text, red?, the query its click puts in the search box].
+CARDS = """
+  out.cards = {};
+  for (const c of q('#cards .card')) {
+    out.cards[$('h4', c).textContent] = q('tr', c).slice(1).map((tr) => texts('td', tr).join('|'));
+  }
+  out.links = [];
+  for (const a of q('#cards a.cn')) {
+    a.click();
+    out.links.push([a.textContent, a.classList.contains('red'), searchBox().value]);
+  }
+  out.open = !!$('#cards details.cards[open]');
+"""
+
+
+@skip_without_browser
+class SummaryCardsInFirefox(FirefoxCase):
+    def cards(self, name, mode, body, ended=True):
+        recs = [START(mode)] + body + ([END] if ended else [])
+        return self.probe(self.render(name, recs), CARDS)
+
+    def test_changes_are_counted_per_table_and_op_by_status(self):
+        out = self.cards("changes", "dry", [
+            ch("orders", "update", "planned"), ch("orders", "update", "planned"),
+            ch("orders", "delete", "applied"),
+            ch("customers", "insert", "failed", level="ERROR"),
+            ch("orders", "update", "failed", level="ERROR")])
+        self.assertTrue(out["open"])
+        # table, op, planned, applied, failed, all; sorted by table, then update/insert/delete
+        self.assertEqual(out["cards"]["Changes"], [
+            "customers|insert|0|0|1|1",
+            "orders|update|2|0|1|3",
+            "|delete|0|1|0|1",
+            "all||2|1|2|5",
         ])
 
-    def test_cards_show_counts_and_red_dry_run_numbers(self):
-        out = self.probe(self.cards_report(), """
-          const cards = document.querySelector('#cards details.cards');
-          out.open = cards.open;
-          out.titles = texts('.card h4', cards);
-          out.red = q('a.cn.red', cards).map((a) => [a.textContent, a.dataset.q]);
-          out.unfinished = q('[data-card=scopes] a.cn', cards).map((a) => [a.textContent, a.dataset.q]);
-          const color = (a) => getComputedStyle(a).color;
-          out.redColor = color(q('a.cn.red', cards)[0]);
-          out.plainColor = color(q('a.cn:not(.red)', cards)[0]);
-        """)
-        self.assertTrue(out["open"])
-        self.assertEqual(out["titles"], ["Changes", "Findings", "Scopes"])
-        self.assertIn(["1", "type:change table:customers op:update status:applied"], out["red"])
-        self.assertIn(["1", "type:change table:orders op:update status:failed"], out["red"])
-        self.assertIn(["1", "type:change status:applied"], out["red"])
-        self.assertIn(["1", "is:unfinished kind:customer"], out["unfinished"])
-        self.assertNotEqual(out["redColor"], out["plainColor"])
+    def test_findings_are_counted_per_check_and_level(self):
+        out = self.cards("findings", "write", [
+            fd("no-lines", "WARNING"), fd("no-lines", "WARNING"), fd("no-lines", "ERROR"),
+            fd("dup", "INFO")])
+        # Only levels that occur get a column: info, warning, error, then all.
+        self.assertEqual(out["cards"]["Findings"], ["dup|1|0|0|1", "no-lines|0|2|1|3"])
 
-    def test_clicking_a_number_filters_the_list(self):
-        out = self.probe(self.cards_report(), """
-          const rows = () => q('.vr').map((r) => r.dataset.i);
-          out.before = rows();
-          const a = (sel) => document.querySelector('#cards a.cn[data-q="' + sel + '"]');
-          a('type:change status:applied').click();
-          out.search = document.querySelector('#bar input[type=search]').value;
-          out.applied = rows();
-          out.count = document.querySelector('#bar .fcount').textContent;
-          a('is:unfinished kind:customer').click();
-          out.unfinished = rows();
-          out.state = R.filter.get();
+    def test_scopes_are_counted_per_kind_in_first_seen_order(self):
+        out = self.cards("scopes", "dry", [
+            msg("scope_start", id=1, kind="phase"),
+            msg("scope_start", id=2, kind="customer", key={"id": 1}, scope=[1]),
+            msg("scope_end", id=2, outcome="error", level="ERROR", scope=[1],
+                exc={"type": "E", "message": "x"}),
+            msg("scope_start", id=3, kind="customer", key={"id": 2}, scope=[1]),
+            msg("scope_end", id=3, outcome="ok", scope=[1]),
+            msg("scope_start", id=4, kind="customer", key={"id": 3}, scope=[1])], ended=False)
+        # kind, Scopes, error, unfinished
+        self.assertEqual(out["cards"]["Scopes"], ["phase|1|0|1", "customer|3|1|1"])
+
+    def test_change_numbers_carry_queries_and_are_red_in_a_dry_run(self):
+        out = self.cards("dry_links", "dry", [
+            ch("orders", "update", "planned"), ch("orders", "update", "applied"),
+            ch("orders", "delete", "planned")])
+        self.assertEqual(out["links"], [
+            ["1", False, "type:change table:orders op:update status:planned"],
+            ["1", True, "type:change table:orders op:update status:applied"],
+            ["2", False, "type:change table:orders op:update"],
+            ["1", False, "type:change table:orders op:delete status:planned"],
+            ["1", False, "type:change table:orders op:delete"],
+            ["2", False, "type:change status:planned"],
+            ["1", True, "type:change status:applied"],
+            ["3", False, "type:change"],
+        ])
+
+    def test_in_a_write_run_only_failed_is_red_and_zeros_are_not_links(self):
+        out = self.cards("write_links", "write", [
+            ch("orders", "update", "applied"), ch("orders", "update", "failed", level="ERROR")])
+        per_row = [l for l in out["links"] if " status:" in l[2] and "table:" in l[2]]
+        self.assertEqual(per_row, [
+            ["1", False, "type:change table:orders op:update status:applied"],
+            ["1", True, "type:change table:orders op:update status:failed"],
+        ])
+        self.assertNotIn("status:planned", " ".join(l[2] for l in out["links"]))
+
+    def test_finding_and_scope_numbers_carry_their_queries(self):
+        out = self.cards("other_links", "dry", [
+            fd("no-lines", "WARNING"), fd("no lines 2", "ERROR"),
+            msg("scope_start", id=1, kind="customer", key={"id": 1}),
+            msg("scope_end", id=1, outcome="error", level="ERROR", exc={"type": "E", "message": "x"}),
+            msg("scope_start", id=2, kind="customer", key={"id": 2})], ended=False)
+        self.assertEqual([l for l in out["links"] if not l[2].startswith("type:change")], [
+            ["1", True, 'check:"no lines 2" level:error'],
+            ["1", False, 'check:"no lines 2"'],
+            ["1", False, "check:no-lines level:warning"],
+            ["1", False, "check:no-lines"],
+            ["2", False, "type:scope_start kind:customer"],
+            ["1", True, "type:scope_end kind:customer"],
+            ["1", False, "is:unfinished kind:customer"],
+        ])
+
+    def test_each_number_lists_exactly_what_it_counts_in_flat_and_tree_mode(self):
+        recs = [
+            START("dry"),
+            msg("scope_start", id=1, kind="orphan-check"),
+            msg("scope_start", id=2, kind="customer", key={"id": 42}, label={"name": "ACME"}, scope=[1]),
+            msg("scope_start", id=4, kind="orphan-check", msg="nested phase", scope=[1, 2]),
+            msg("scope_end", id=4, outcome="error", level="ERROR", scope=[1, 2], exc={"type": "E", "message": "y"}),
+            fd("no-lines", "WARNING"), fd("no-lines", "ERROR", scope=[1, 2]),
+            ch("orders", "update", "planned", scope=[1, 2]),
+            ch("orders", "delete", "applied", scope=[1, 2]),
+            ch("shop.orders", "delete", "planned"),
+            ch("customers", "update", "failed", level="ERROR"),
+            msg("scope_end", id=2, outcome="error", level="ERROR", scope=[1], exc={"type": "E", "message": "x"}),
+            msg("scope_start", id=3, kind="customer", key={"id": 43}, scope=[1]),
+            msg("message", msg="working", scope=[1, 3]),
+        ]
+        out = self.probe(self.render("exact", recs), """
+          out.checks = [];
+          for (const m of ['flat', 'tree']) {
+            mode(m);
+            for (const a of q('#cards a.cn')) {
+              a.click();
+              out.checks.push([m, a.textContent, searchBox().value, count()]);
+            }
+          }
         """)
-        self.assertEqual(out["before"], ["1", "2", "3", "4", "5", "7", "8"])
-        self.assertEqual(out["search"], "type:change status:applied")
-        # tree mode: the applied Change plus the Scopes that enclose it
-        self.assertEqual(out["applied"], ["1", "2", "4"])
-        self.assertIn("1 matching", out["count"])
-        self.assertEqual(out["unfinished"], ["1", "7"])
-        self.assertEqual(out["state"]["q"], "is:unfinished kind:customer")
+        self.assertGreater(len(out["checks"]), 30)
+        for m, number, query, shown in out["checks"]:
+            self.assertTrue(shown.startswith(number + " matching"), (m, query, number, shown))
+
+    def test_a_run_without_changes_findings_or_scopes_gets_no_cards(self):
+        out = self.probe(self.render("nocards", [START("dry"), msg("message", msg="hi"), END]),
+                         "out.cards = q('#cards *').length;")
+        self.assertEqual(out["cards"], 0)
 
 
 if __name__ == "__main__":

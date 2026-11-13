@@ -4,8 +4,6 @@ import datetime
 import decimal
 import enum
 import ipaddress
-import json
-import logging
 import os
 import shutil
 import sys
