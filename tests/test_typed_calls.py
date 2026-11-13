@@ -304,27 +304,18 @@ class GetLoggerTest(TypedCallTestCase):
     def test_get_logger_returns_adapter_for_named_logger(self):
         log = dbfixlog.get_logger("shop.fixes")
         self.assertIsInstance(log, logging.LoggerAdapter)
-        self.assertIs(log.logger, logging.getLogger("shop.fixes"))
+        self.assertEqual(log.logger.name, "dbfixlog.shop.fixes")
+        self.assertIsNot(log.logger, logging.getLogger("shop.fixes"))
 
-
-class _Capture(logging.Handler):
-    def __init__(self):
-        logging.Handler.__init__(self)
-        self.records = []
-
-    def emit(self, record):
-        self.records.append(record)
+    def test_get_logger_without_name_is_the_main_logger(self):
+        main = dbfixlog.get_logger("__main__").logger
+        self.assertIs(dbfixlog.get_logger(None).logger, main)
+        self.assertIs(dbfixlog.get_logger("").logger, main)
 
 
 class OutsideRunTest(unittest.TestCase):
     def test_typed_calls_fall_back_to_plain_logging(self):
-        logger = logging.getLogger("outside.run")
-        cap = _Capture()
-        logger.addHandler(cap)
-        logger.setLevel(logging.DEBUG)
-        logger.propagate = False
-        self.addCleanup(logger.removeHandler, cap)
-        self.addCleanup(setattr, logger, "propagate", True)
+        cap = helpers.capture_root(self, level=logging.DEBUG)
         log = dbfixlog.get_logger("outside.run")
 
         log.change("orders", "delete", key={"id": 156})
@@ -340,9 +331,19 @@ class OutsideRunTest(unittest.TestCase):
              ("WARNING", "invalid change call: key must be a {column: value} "
                          "object, got int 156"),
              ("WARNING", "orphan-order: no customer"),
-             ("INFO", "inside")])
+             ("INFO", "scope_start customer"),
+             ("INFO", "inside"),
+             ("INFO", "scope_end customer")])
+        self.assertEqual({r.name for r in cap.records}, {"dbfixlog.outside.run"})
         self.assertFalse(hasattr(log, "dry_run"))
         self.assertFalse(hasattr(log, "write_run"))
+
+    def test_module_scope_outside_run_has_full_name(self):
+        cap = helpers.capture_root(self, level=logging.DEBUG)
+        with dbfixlog.scope("phase"):
+            pass
+        self.assertEqual([r.name for r in cap.records],
+                         ["dbfixlog." + __name__] * 2)
 
 
 if __name__ == "__main__":

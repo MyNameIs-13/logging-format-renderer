@@ -140,7 +140,7 @@ class ScopeTest(unittest.TestCase):
         def worker(name):
             with dbfixlog.scope("worker", key={"name": name}):
                 ready.wait()  # both Scopes open at once
-                logging.getLogger("w").info(name)
+                dbfixlog.get_logger("w").info(name)
                 ready.wait()
 
         with dbfixlog.run(self.path, mode="dry", console=False):
@@ -163,7 +163,7 @@ class ScopeTest(unittest.TestCase):
     def test_decorator_opens_a_fresh_scope_per_call(self):
         @dbfixlog.scope("orphan-check", msg="check")
         def check(n):
-            logging.getLogger("x").info("n=%d", n)
+            dbfixlog.get_logger("x").info("n=%d", n)
             return n * 2
 
         with dbfixlog.run(self.path, mode="dry", console=False):
