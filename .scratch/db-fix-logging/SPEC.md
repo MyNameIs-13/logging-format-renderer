@@ -422,10 +422,10 @@ The Report shows a run summary on top, then one list with fixed, resizable colum
 - every field
 - a field-changes table
 - the traceback
-- the raw JSON
+- the raw JSON, titled with the record's Log File line (`raw JSON (line 25)`)
 - the Scope path, with each Scope clickable to reveal it in the tree
 
-For a Scope row it instead shows the Scope's totals and a "show only this Scope" link.
+For a Scope row it instead shows the Scope's totals and a "show only this Scope" link. The Scope's `id` is not shown as a field; it appears only in the raw JSON and in the `in:` query.
 
 ### 6.3 Filters and Scope headers
 

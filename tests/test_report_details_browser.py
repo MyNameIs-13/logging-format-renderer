@@ -70,6 +70,8 @@ class DetailsPanelInFirefox(FirefoxCase):
           out.text = panel.textContent;
           out.fchanges = q('.fchanges tbody tr', panel).map((tr) => texts('td', tr).join('|'));
           out.raw = JSON.parse($('pre.raw', panel).textContent);
+          out.rawTitles = texts('.rawbox summary', panel);
+          out.factKeys = texts('table.facts td.k', panel);
           out.crumb = texts('.crumb [data-reveal]', panel);
           row(4).lastElementChild.click();
           out.traceback = $('pre.tb', panel).textContent;
@@ -84,8 +86,10 @@ class DetailsPanelInFirefox(FirefoxCase):
         self.assertEqual(out["raw"]["changes"]["note"], {"old": None, "new": "x"})
         self.assertEqual(out["raw"]["type"], "change")
         self.assertEqual(out["crumb"], ["orphan-check", "customer ACME"])
-        for s in ("fix.py:1", "customers", "planned", "line"):
+        for s in ("fix.py:1", "customers", "planned"):
             self.assertIn(s, out["text"])
+        self.assertEqual(out["rawTitles"], ["raw JSON (line 4)"])
+        self.assertNotIn("line", out["factKeys"])
         self.assertIn("ValueError: bad row", out["traceback"])
         self.assertIn("File \"fix.py\", line 9", out["traceback"])
         self.assertEqual(out["fields"], ["row", "3"])
@@ -99,8 +103,11 @@ class DetailsPanelInFirefox(FirefoxCase):
           out.totals = q('.totals tr', panel).map((tr) => texts('td', tr).join('|'));
           out.only = q('a[data-q]', panel).map((a) => a.textContent);
           out.traceback = $('pre.tb', panel).textContent;
+          out.factKeys = texts('table.facts td.k', panel);
+          out.rawTitles = texts('.rawbox summary', panel);
           row(5).lastElementChild.click();
           out.endTraceback = $('pre.tb', panel).textContent;
+          out.endFactKeys = texts('table.facts td.k', panel);
         """)
         self.assertIn("customer ACME", out["text"])
         self.assertIn("scope error", out["text"])
@@ -109,6 +116,12 @@ class DetailsPanelInFirefox(FirefoxCase):
         self.assertEqual(out["only"], ["show only this Scope"])
         self.assertIn("TB-OF-SCOPE", out["traceback"])
         self.assertIn("TB-OF-SCOPE", out["endTraceback"])
+        self.assertIn("kind", out["factKeys"])
+        self.assertNotIn("id", out["factKeys"])
+        self.assertIn("outcome", out["endFactKeys"])
+        self.assertNotIn("id", out["endFactKeys"])
+        self.assertEqual(out["rawTitles"], ["raw JSON (scope_start, line 3)",
+                                            "raw JSON (scope_end, line 6)"])
 
     def test_scope_path_click_reveals_scope_in_tree(self):
         out = self.probe(self.panel_report(), """

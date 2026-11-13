@@ -1070,19 +1070,21 @@ const RECORD_TITLES = { change: "Change", finding: "Finding", message: "Message"
 // Shown in their own sections (or the Scope path), not in the field table.
 const OWN_SECTIONS = { scope: 1, changes: 1, fields: 1, exc: 1, error: 1 };
 
-// Every field of record i, then field changes, error, fields, traceback and raw JSON.
+// Every field of record i, then field changes, error, fields, traceback and raw JSON
+// (titled with the record's Log File line).
 function recordDetailsHTML(m, i) {
   const r = m.records[i];
   let h = '<div class="detail"><h3>' + esc(RECORD_TITLES[r.type] || r.type) + " " + statusHTML(m, i) + "</h3>" +
     crumbHTML(m, r.scope) + '<table class="facts">';
   for (const k of Object.keys(r)) {
     if (k in OWN_SECTIONS) continue;
+    // A Scope's id only links its records; readers know a Scope by its name.
+    if (k === "id" && (r.type === "scope_start" || r.type === "scope_end")) continue;
     const v = r[k];
     if (k === "key" || k === "label") h += kvRow(k, pairsHTML(v));
     else if (k === "ts" || k === "src" || k === "logger") h += kvRow(k, '<span class="mono">' + esc(v) + "</span>");
     else h += kvRow(k, valueHTML(v));
   }
-  h += kvRow("line", '<span class="mono">' + esc(m.lines[i]) + "</span>");
   if (m.warn[i]) h += kvRow("warning", '<span class="out-error">⚠ ' + esc(m.warn[i]) + "</span>");
   if (m.odd[i]) h += kvRow("warning", '<span class="out-error">⚠ ' + esc(m.odd[i]) + "</span>");
   h += "</table>";
@@ -1096,7 +1098,8 @@ function recordDetailsHTML(m, i) {
   if (isPlainObject(r.error)) {
     h += '<section><b class="out-error">' + esc(r.error.type) + "</b>: " + esc(r.error.message) + "</section>";
   }
-  h += fieldTableHTML("Fields", r.fields) + excHTML(r.exc) + rawHTML("raw JSON", r);
+  h += fieldTableHTML("Fields", r.fields) + excHTML(r.exc) +
+    rawHTML("raw JSON (line " + m.lines[i] + ")", r);
   return h + "</div>";
 }
 
@@ -1113,7 +1116,7 @@ function scopeDetailsHTML(m, id) {
     kvRow("key", r.key !== undefined ? pairsHTML(r.key) : '<span class="dim">phase (no key)</span>');
   if (r.label !== undefined) h += kvRow("label", pairsHTML(r.label));
   if (r.msg !== undefined) h += kvRow("msg", esc(r.msg));
-  h += kvRow("id", esc(id)) + kvRow("logger", '<span class="mono">' + esc(r.logger) + "</span>");
+  h += kvRow("logger", '<span class="mono">' + esc(r.logger) + "</span>");
   if (r.src !== undefined) h += kvRow("src", '<span class="mono">' + esc(r.src) + "</span>");
   h += kvRow("started", '<span class="mono">' + esc(r.ts) + "</span>");
   h += e ? kvRow("ended", '<span class="mono">' + esc(e.ts) + "</span>") + kvRow("duration", esc(duration(t.duration_ms)))
@@ -1126,7 +1129,8 @@ function scopeDetailsHTML(m, id) {
     kvRow("Findings", esc(t.findings)) + "</table></section>" +
     '<p><a href="#" data-q="in:' + esc(id) + '">show only this Scope</a></p>' +
     fieldTableHTML("Fields", r.fields) + (e ? excHTML(e.exc) : "") +
-    rawHTML("raw JSON (scope_start)", r) + (e ? rawHTML("raw JSON (scope_end)", e) : "");
+    rawHTML("raw JSON (scope_start, line " + m.lines[s.start] + ")", r) +
+    (e ? rawHTML("raw JSON (scope_end, line " + m.lines[s.end] + ")", e) : "");
   return h + "</div>";
 }
 
