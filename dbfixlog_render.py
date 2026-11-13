@@ -13,11 +13,12 @@ import json
 import os
 import pathlib
 import sys
+import types
 import webbrowser
 
 __version__ = "0.1.0"
 # Format majors this renderer reads, each mapped to the newest minor it knows.
-KNOWN_MINORS = {1: 0}
+KNOWN_MINORS = types.MappingProxyType({1: 0})
 # Shape version of the payload embedded in the Report (documented at the top of report.js).
 PAYLOAD_VERSION = 1
 
@@ -53,13 +54,14 @@ def _parse_line(line):
 
 def _load_records(raw):
     """Split a snapshot of the Log File into records, their 1-based line numbers, and the
-    numbers and text of malformed lines. A last line without a trailing newline is
-    returned separately as incomplete (its line number), never parsed."""
+    numbers and text of malformed lines. A last line without a trailing newline is kept
+    if it parses as a whole record; otherwise it is a partial line, returned separately
+    as incomplete (its line number)."""
     chunks = raw.split(b"\n")
     incomplete = None
     if chunks[-1] == b"":
         chunks.pop()  # the file ends with a newline
-    else:
+    elif _parse_line(chunks[-1]) is None:
         incomplete = len(chunks)
         chunks.pop()
     records, lines, bad = [], [], []
@@ -73,6 +75,14 @@ def _load_records(raw):
     return records, lines, bad, incomplete
 
 
+def _plural(count, noun):
+    return "{} {}{}".format(count, noun, "" if count == 1 else "s")
+
+
+def _known_majors():
+    return ", ".join(str(m) for m in sorted(KNOWN_MINORS))
+
+
 def _malformed_notice(bad):
     samples = []
     for number, line in bad[:MAX_SAMPLES]:
@@ -83,10 +93,9 @@ def _malformed_notice(bad):
     count = len(bad)
     return {
         "kind": "malformed_lines",
-        "count": count,
         "lines": [number for number, _ in bad],
         "samples": samples,
-        "message": "{} malformed line{} skipped".format(count, "" if count == 1 else "s"),
+        "message": "{} skipped".format(_plural(count, "malformed line")),
     }
 
 
@@ -164,14 +173,14 @@ def _parser():
         prog="dbfixlog_render.py",
         description="Render a Log File into a self-contained HTML Report "
                     "(renderer {}, reads format major {}).".format(
-                        __version__, ", ".join(str(m) for m in sorted(KNOWN_MINORS))),
+                        __version__, _known_majors()),
         epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("log", metavar="LOG", help="the Log File (JSON Lines)")
+    parser.add_argument("log_file", metavar="LOG_FILE", help="the Log File (JSON Lines)")
     parser.add_argument("-o", dest="output", metavar="PATH|-",
                         help="output path, or - for stdout "
-                             "(default: LOG's stem with .html, next to LOG; overwritten)")
+                             "(default: the Log File's stem with .html, next to it; overwritten)")
     parser.add_argument("--title", metavar="TEXT",
-                        help="Report title (default: run_start.title, then LOG's name)")
+                        help="Report title (default: run_start.title, then the Log File's name)")
     parser.add_argument("--open", action="store_true",
                         help="open the Report in the default browser")
     parser.add_argument("--strict", action="store_true",
@@ -199,10 +208,10 @@ def _check_format(header, log):
     if major not in KNOWN_MINORS:
         raise Fatal(3, "{}: format {} is not supported; this renderer reads format major {}; "
                        "update dbfixlog_render.py".format(
-                           log, fmt, ", ".join(str(m) for m in sorted(KNOWN_MINORS))))
+                           log, fmt, _known_majors()))
     known = "{}.{}".format(major, KNOWN_MINORS[major])
     if minor > KNOWN_MINORS[major]:
-        return {"kind": "newer_minor", "format": fmt, "reads": known,
+        return {"kind": "newer_minor",
                 "message": "Log File format {} is newer than {}, which this renderer knows; "
                            "newer fields may not be shown".format(fmt, known)}
     return None
@@ -217,32 +226,30 @@ def _read_log(path):
 
 
 def _render(args):
-    raw = _read_log(args.log)
+    raw = _read_log(args.log_file)
     records, lines, bad, incomplete = _load_records(raw)
     if not records or lines[0] != 1 or records[0].get("type") != "run_start":
-        raise Fatal(1, "{}: first line is not a run_start, not a Log File".format(args.log))
+        raise Fatal(1, "{}: first line is not a run_start, not a Log File".format(args.log_file))
     notices = []
-    newer = _check_format(records[0], args.log)
+    newer = _check_format(records[0], args.log_file)
     if newer:
         notices.append(newer)
     if bad:
+        what = _plural(len(bad), "malformed line")
+        numbers = _line_list([n for n, _ in bad])
         if args.strict:
-            raise Fatal(4, "{}: {} malformed line{} (line {}); not rendering under --strict".format(
-                args.log, len(bad), "" if len(bad) == 1 else "s", _line_list([n for n, _ in bad])))
+            raise Fatal(4, "{}: {} (line {}); not rendering under --strict".format(
+                args.log_file, what, numbers))
         notices.append(_malformed_notice(bad))
-        sys.stderr.write("{}: warning: {}: skipped {} malformed line{}: {}\n".format(
-            PROG, args.log, len(bad), "" if len(bad) == 1 else "s",
-            _line_list([n for n, _ in bad])))
+        sys.stderr.write("{}: warning: {}: skipped {}: {}\n".format(PROG, args.log_file, what, numbers))
     if incomplete is not None:
         notices.append({"kind": "incomplete_last_line", "line": incomplete,
                         "message": INCOMPLETE_MESSAGE})
-    title = _title(args.title, records[0], args.log)
+    title = _title(args.title, records[0], args.log_file)
     payload = {
         "payload": PAYLOAD_VERSION,
-        "renderer": __version__,
-        "source": os.path.basename(args.log),
+        "source": os.path.basename(args.log_file),
         "title": title,
-        "unfinished": not any(r.get("type") == "run_end" for r in records),
         "notices": notices,
         "records": records,
         "lines": lines,
@@ -253,7 +260,7 @@ def _render(args):
         sys.stdout.buffer.flush()
         where = "stdout"
     else:
-        where = args.output or os.path.splitext(args.log)[0] + ".html"
+        where = args.output or os.path.splitext(args.log_file)[0] + ".html"
         try:
             with open(where, "wb") as f:
                 f.write(report)

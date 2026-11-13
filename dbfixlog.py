@@ -1,6 +1,6 @@
 """dbfixlog: stdlib-logging writer for Database Fix Log Files (JSON Lines).
 
-Python 3.6.3+, stdlib only. See .scratch/db-fix-logging/SPEC.md.
+Python 3.6.3+, stdlib only.
 """
 
 import datetime
@@ -19,25 +19,19 @@ __version__ = "0.1.0"
 FORMAT_VERSION = "1.0"
 LOGGER_NAME = "dbfixlog"
 
-# The one namespaced LogRecord attribute that carries typed fields (SPEC 4.6).
+# The one namespaced LogRecord attribute that carries typed fields, so they
+# never clash with the stdlib's own LogRecord attributes.
 # Pass it as ``extra={ATTR: {...}}``; its keys are merged into the record dict.
 ATTR = "dbfixlog"
 
 MODES = ("dry", "write")
 
-_lock = threading.Lock()
-_active = None  # the active _Run, or None
-
-
-def _active_run():
-    return _active
-
 
 # --------------------------------------------------------------------------
-# Value encoding (SPEC 3.5).
+# Value encoding.
 # --------------------------------------------------------------------------
 
-# Record slots that hold logged *values*: they get the full SPEC 3.5
+# Record slots that hold logged *values*: they get the full value
 # encoding, including ``max_text`` truncation. Every other slot (msg,
 # Run Header fields, exc, ...) is only made JSON-safe.
 VALUE_SLOTS = ("key", "label", "fields", "changes")
@@ -46,28 +40,31 @@ DEFAULT_MAX_TEXT = 1000
 BYTES_PREFIX = 64
 
 
-def _encode(value, run=None, truncate=True):
-    """Return ``value`` in JSON-safe form, for display (SPEC 3.5).
+def _encode(value, run=None, truncate=True, _open=None):
+    """Return ``value`` in JSON-safe form, for display.
 
     This is the single place that turns a Python value into something
     ``json.dumps(..., allow_nan=False)`` accepts. ``run`` carries the
-    Run's ``encoders``, ``strict`` and ``max_text`` settings. With
+    Run's ``encoders`` and ``max_text`` settings. With
     ``truncate=False`` long text is kept whole (non-value slots).
 
     A custom encoder (``encoders={Type: fn}``, matched along the value's
     MRO) wins over the built-in rules. Its result is encoded again, by
     the built-in rules alone if it has the same type as the input.
+
+    ``_open`` holds the ids of the containers being encoded around this
+    value: a container that contains itself becomes ``$unencodable``.
     """
     fn = _custom_encoder(value, run)
     if fn is not None:
         try:
             result = fn(value)
         except Exception as e:
-            return _unencodable(value, e, run)
+            return _unencodable(value, e)
         if type(result) is type(value):
-            return _builtin_encode(result, run, truncate)
-        return _encode(result, run, truncate)
-    return _builtin_encode(value, run, truncate)
+            return _builtin_encode(result, run, truncate, _open)
+        return _encode(result, run, truncate, _open)
+    return _builtin_encode(value, run, truncate, _open)
 
 
 def _custom_encoder(value, run):
@@ -81,11 +78,14 @@ def _custom_encoder(value, run):
     return None
 
 
-def _builtin_encode(value, run, truncate):
+CONTAINERS = (dict, list, tuple, set, frozenset)
+
+
+def _builtin_encode(value, run, truncate, _open=None):
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, enum.Enum):
-        return _encode(value.value, run, truncate)
+        return _encode(value.value, run, truncate, _open)
     if isinstance(value, str):
         limit = (getattr(run, "max_text", DEFAULT_MAX_TEXT) if run is not None
                  else DEFAULT_MAX_TEXT)
@@ -105,30 +105,54 @@ def _builtin_encode(value, run, truncate):
     if isinstance(value, (bytes, bytearray, memoryview)):
         data = bytes(value)
         return {"$bytes": data[:BYTES_PREFIX].hex(), "length": len(data)}
+    if isinstance(value, CONTAINERS):
+        if _open is None:
+            _open = set()
+        if id(value) in _open:
+            return _unencodable(value, ValueError("value contains itself"))
+        _open.add(id(value))
+        try:
+            return _encode_container(value, run, truncate, _open)
+        finally:
+            _open.discard(id(value))
+    return _str_or_unencodable(value)
+
+
+def _encode_container(value, run, truncate, _open):
     if isinstance(value, dict):
-        return {str(k): _encode(v, run, truncate) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_encode(v, run, truncate) for v in value]
+        return {_encode_key(k): _encode(v, run, truncate, _open)
+                for k, v in value.items()}
     if isinstance(value, (set, frozenset)):
         try:
-            items = sorted(value)
+            value = sorted(value)
         except TypeError:
-            items = list(value)
-        return [_encode(v, run, truncate) for v in items]
-    return _str_or_unencodable(value, run)
+            value = list(value)
+    return [_encode(v, run, truncate, _open) for v in value]
 
 
-def _str_or_unencodable(value, run):
+def _encode_key(key):
+    """A dict key as a JSON object key: ``str(key)``, or the
+    ``$unencodable`` text when that raises."""
+    text = _str_or_unencodable(key)
+    if isinstance(text, dict):
+        return "$unencodable: " + text["$unencodable"]
+    return text
+
+
+def _str_or_unencodable(value):
     try:
         return str(value)
     except Exception as e:
-        return _unencodable(value, e, run)
+        return _unencodable(value, e)
 
 
-def _unencodable(value, error, run):
-    """``{"$unencodable": ...}`` for ``error``; re-raises it under strict."""
-    if run is not None and run.strict:
-        raise error
+def _given(**values):
+    """The keyword arguments that are not None, in order."""
+    return {k: v for k, v in values.items() if v is not None}
+
+
+def _unencodable(value, error):
+    """``{"$unencodable": ...}`` for ``error``."""
     try:
         text = repr(value)
     except Exception:
@@ -164,7 +188,9 @@ def _exc_dict(exc_info):
     etype, evalue, tb = exc_info
     return {
         "type": etype.__name__,
-        "message": str(evalue),
+        # Encoded with str() at write time, so a raising __str__ becomes
+        # $unencodable instead of losing the record.
+        "message": evalue,
         "traceback": "".join(traceback.format_exception(etype, evalue, tb)),
     }
 
@@ -216,6 +242,71 @@ def _record_from_logrecord(record):
 
 
 # --------------------------------------------------------------------------
+# Run filter, shared by the Run's handlers.
+# --------------------------------------------------------------------------
+
+# LogRecord attribute naming the RunFilter that already resolved the record.
+RESOLVED_BY = "dbfixlog_resolved_by"
+
+# Record types written whatever the configured level.
+ALWAYS_WRITTEN = ("scope_start", "scope_end")
+
+
+class RunFilter(logging.Filter):
+    """Resolves the Run-dependent parts of a record once, for all of the
+    Run's handlers: Scope ids and the thread's Scope path, a Change's
+    default status."""
+
+    def __init__(self, run):
+        logging.Filter.__init__(self)
+        self.run = run
+        self.scope_state = threading.local()  # .path: this thread's Scopes
+        self.scope_labels = {}  # Scope id -> console label
+        self._scope_ids = 0
+        self._scope_lock = threading.Lock()
+
+    def _next_scope_id(self):
+        with self._scope_lock:
+            self._scope_ids += 1
+            return self._scope_ids
+
+    def filter(self, record):
+        if getattr(record, RESOLVED_BY, None) is self:
+            return True
+        original = getattr(record, ATTR, None) or {}
+        data = dict(original)
+        rtype = data.get("type")
+        path = list(getattr(self.scope_state, "path", None) or [])
+        if rtype == "scope_start":
+            data["id"] = original["id"] = self._next_scope_id()
+            self.scope_labels[data["id"]] = _safe(
+                lambda: scope_label(data.get("kind"), data.get("key"),
+                                    data.get("label")),
+                str(data.get("kind")))
+        elif rtype == "scope_end" and data.get("id") in path:
+            path = path[:path.index(data["id"])]
+            self.scope_state.path = path
+        if path:
+            data.setdefault("scope", list(path))
+        if rtype == "scope_start":
+            self.scope_state.path = path + [data["id"]]
+        if rtype == "change" and data.get("status") is None:
+            if data.get("error") is not None:
+                data["status"] = "failed"
+            else:
+                data["status"] = "planned" if self.run.mode == "dry" else "applied"
+        setattr(record, ATTR, data)
+        setattr(record, RESOLVED_BY, self)
+        return True
+
+
+def _below(record, threshold):
+    data = getattr(record, ATTR, None) or {}
+    return (record.levelno < threshold
+            and data.get("type") not in ALWAYS_WRITTEN)
+
+
+# --------------------------------------------------------------------------
 # JSONL handler.
 # --------------------------------------------------------------------------
 
@@ -223,9 +314,10 @@ class JsonlHandler(logging.Handler):
     """Writes one JSON object per line. Never raises from ``emit``."""
 
     def __init__(self, stream, run, level=logging.NOTSET):
-        logging.Handler.__init__(self, level)
+        logging.Handler.__init__(self)
         self.stream = stream
         self.run = run
+        self.threshold = level
 
     def write_dict(self, rec):
         line = json.dumps(_encode_record(rec, self.run), ensure_ascii=False,
@@ -238,16 +330,16 @@ class JsonlHandler(logging.Handler):
             self.release()
 
     def emit(self, record):
+        if _below(record, self.threshold):
+            return
         try:
             self.write_dict(_record_from_logrecord(record))
         except Exception:
-            if self.run is not None and self.run.strict:
-                raise
             self.handleError(record)
 
 
 # --------------------------------------------------------------------------
-# Console handler (SPEC 4.5).
+# Console handler.
 # --------------------------------------------------------------------------
 
 def _show(value):
@@ -281,15 +373,19 @@ def scope_label(kind, key=None, label=None):
 class ConsoleHandler(logging.Handler):
     """The terse stderr view: one line per record, prefixed by the label
     of the innermost Scope. Changes and Findings are summarised from their
-    ATTR fields; Messages use the stdlib message text. No colours."""
+    ATTR fields; Messages go through a stdlib ``logging.Formatter``
+    (message, exception and stack). Times are UTC. No colours."""
 
     def __init__(self, stream, run, level=logging.INFO):
-        logging.Handler.__init__(self, level)
+        logging.Handler.__init__(self)
         self.stream = stream
         self.run = run
+        self.threshold = level
         self.setFormatter(logging.Formatter())
 
     def emit(self, record):
+        if record.levelno < self.threshold:
+            return
         try:
             data = getattr(record, ATTR, None) or {}
             rtype = data.get("type")
@@ -297,46 +393,37 @@ class ConsoleHandler(logging.Handler):
                 body = self._change(data)
             elif rtype == "finding":
                 body = self._finding(data)
+            elif rtype in ALWAYS_WRITTEN:
+                body = self._scope(data, record.exc_info)
+                if body is None:
+                    return
             else:
-                body = record.getMessage()
-                if record.exc_info:
-                    body += "\n" + self.formatter.formatException(
-                        record.exc_info)
-            self._line(record.created, record.levelno, record.levelname,
-                       data.get("scope"), body)
-        except Exception:
-            if self.run is not None and self.run.strict:
-                raise
-            self.handleError(record)
-
-    def write_scope(self, rec, levelno):
-        """Console line for a scope_start (always) or an error scope_end."""
-        try:
-            label = self.run.scope_labels.get(rec["id"], "")
-            if rec["type"] == "scope_start":
-                body = "start " + label
-            elif rec.get("outcome") == "error":
-                exc = rec.get("exc") or {}
-                body = "end %s error" % label
-                if exc:
-                    body += ": %s: %s" % (exc.get("type"), exc.get("message"))
-            else:
-                return
-            if rec.get("msg") is not None:
-                body += " - %s" % rec["msg"]
-            self._line(time.time(), levelno, rec["level"], rec.get("scope"),
+                body = self.format(record)
+            self._line(record.created, record.levelname, data.get("scope"),
                        body)
         except Exception:
-            if self.run is not None and self.run.strict:
-                raise
+            self.handleError(record)
 
-    def _line(self, created, levelno, levelname, path, body):
-        if levelno < self.level:
-            return
-        prefix = time.strftime("%H:%M:%S", time.localtime(created))
+    def _scope(self, data, exc_info):
+        """A scope_start line, an error scope_end line, or None."""
+        label = self.run.filter.scope_labels.get(data.get("id"), "")
+        if data["type"] == "scope_start":
+            body = "start " + label
+        elif data.get("outcome") == "error":
+            body = "end %s error" % label
+            if exc_info and exc_info[0]:
+                body += ": %s: %s" % (exc_info[0].__name__,
+                                      _safe(lambda: str(exc_info[1]), "?"))
+        else:
+            return None
+        return self._with_msg(body, data)
+
+    def _line(self, created, levelname, path, body):
+        # The UTC hh:mm:ss of the record's ts, as the Report shows it.
+        prefix = _format_ts(created)[11:19]
         prefix += " %-5s " % levelname
         if path:
-            label = self.run.scope_labels.get(path[-1])
+            label = self.run.filter.scope_labels.get(path[-1])
             if label:
                 prefix += label + " › "
         self.acquire()
@@ -377,14 +464,14 @@ class ConsoleHandler(logging.Handler):
 
 
 # --------------------------------------------------------------------------
-# Adapter returned by run().
+# Adapters.
 # --------------------------------------------------------------------------
 
 OPS = ("update", "insert", "delete")
 
 
 def _change_misuse(op, key, changes):
-    """What is wrong with a ``change(...)`` call (SPEC 4.3), or None."""
+    """What is wrong with a ``change(...)`` call, or None."""
     if op not in OPS:
         return "unknown op %r (expected update, insert or delete)" % (op,)
     if op == "update" and not changes:
@@ -405,14 +492,12 @@ def _old_new(entry):
     return entry
 
 
-class RunLogger(logging.LoggerAdapter):
-    """Stdlib adapter: the usual methods plus ``fields=``.
+class TypedLogger(logging.LoggerAdapter):
+    """Stdlib adapter: the usual methods plus ``fields=``, and the typed
+    calls ``change``, ``finding`` and ``scope``."""
 
-    Typed calls (finding, change, scope) are added by later tickets.
-    """
-
-    def __init__(self, logger, extra=None):
-        logging.LoggerAdapter.__init__(self, logger, extra or {})
+    def __init__(self, logger):
+        logging.LoggerAdapter.__init__(self, logger, {})
 
     def process(self, msg, kwargs):
         fields = kwargs.pop("fields", None)
@@ -426,30 +511,22 @@ class RunLogger(logging.LoggerAdapter):
 
     def change(self, table, op, *, key=None, label=None, changes=None,
                msg=None, status=None, error=None, level=None, fields=None):
-        """Log one row operation as a Change (SPEC 3.3, 4.3)."""
-        run = _active_run()
+        """Log one row operation as a Change."""
         src = _caller(1)[0]
         problem = _change_misuse(op, key, changes)
-        if problem is not None and run is not None and run.strict:
-            raise ValueError("invalid change call: " + problem)
-        if status is None:
-            if error is not None:
-                status = "failed"
-            elif run is not None:
-                status = "planned" if run.mode == "dry" else "applied"
+        if level is None:
+            failed = status == "failed" or error is not None
+            level = logging.ERROR if failed else logging.INFO
         if error is not None:
             # The exception itself becomes ``str()`` at write time, through
             # _encode, so a raising __str__ never escapes the call.
             error = {"type": type(error).__name__, "message": error}
-        data = {"type": "change", "msg": msg, "table": table, "op": op}
         if isinstance(changes, dict):
             changes = {f: _old_new(v) for f, v in changes.items()}
-        for k, v in (("key", key), ("label", label), ("changes", changes),
-                     ("status", status), ("error", error), ("fields", fields)):
-            if v is not None:
-                data[k] = v
-        if level is None:
-            level = logging.ERROR if status == "failed" else logging.INFO
+        data = {"type": "change", "msg": msg, "table": table, "op": op}
+        data.update(_given(key=key, label=label, changes=changes))
+        data["status"] = status
+        data.update(_given(error=error, fields=fields))
         self._typed(level, "%s %s" % (op, table), data, src)
         if problem is not None:
             self._typed(logging.WARNING, "invalid change call: " + problem,
@@ -457,17 +534,14 @@ class RunLogger(logging.LoggerAdapter):
 
     def finding(self, check, msg=None, *, table=None, key=None, label=None,
                 level=logging.WARNING, fields=None):
-        """Log a Finding: ``check`` is the stable rule name (SPEC 3.3, 4.3)."""
+        """Log a Finding: ``check`` is the stable rule name."""
         data = {"type": "finding", "msg": msg, "check": check}
-        for k, v in (("table", table), ("key", key), ("label", label),
-                     ("fields", fields)):
-            if v is not None:
-                data[k] = v
+        data.update(_given(table=table, key=key, label=label, fields=fields))
         text = check if msg is None else "%s: %s" % (check, msg)
         self._typed(level, text, data, _caller(1)[0])
 
     def scope(self, kind, *, key=None, label=None, msg=None, fields=None):
-        """Open a Scope stamped with this logger's name (SPEC 3.4, 4.3)."""
+        """Open a Scope stamped with this logger's name."""
         return _Scope(kind, key, label, msg, fields, _caller(1)[0],
                       self.logger.name)
 
@@ -477,48 +551,36 @@ class RunLogger(logging.LoggerAdapter):
         data["src"] = src
         self.logger.log(level, "%s", text, extra={ATTR: data})
 
+
+class RunLogger(TypedLogger):
+    """The adapter ``run()`` returns: a TypedLogger that also knows the
+    Run's mode."""
+
+    def __init__(self, logger, run):
+        TypedLogger.__init__(self, logger)
+        self.run = run
+
     @property
     def dry_run(self):
-        run = _active_run()
-        return run is not None and run.mode == "dry"
+        return self.run.mode == "dry"
 
     @property
     def write_run(self):
-        run = _active_run()
-        return run is not None and run.mode == "write"
+        return self.run.mode == "write"
 
 
 def get_logger(name):
     """The adapter for helper modules: ``log = dbfixlog.get_logger(__name__)``.
 
-    It finds the active Run at call time, so it may be created at import
-    time, before any Run is open.
+    It may be created at import time, before any Run is open: its records
+    reach whichever Run is open when they are logged.
     """
-    return RunLogger(logging.getLogger(name))
+    return TypedLogger(logging.getLogger(name))
 
 
 # --------------------------------------------------------------------------
-# Scopes (SPEC 3.4, 4.6).
+# Scopes.
 # --------------------------------------------------------------------------
-
-_scope_state = threading.local()  # .path: open Scope ids in this thread
-
-
-def _scope_path():
-    return getattr(_scope_state, "path", None) or []
-
-
-class ScopeFilter(logging.Filter):
-    """Stamps the current thread's Scope path into the ATTR dict."""
-
-    def filter(self, record):
-        path = _scope_path()
-        if path:
-            data = dict(getattr(record, ATTR, None) or {})
-            data.setdefault("scope", list(path))
-            setattr(record, ATTR, data)
-        return True
-
 
 def _caller(depth):
     """``(src, logger name)`` of the frame ``depth`` levels above the caller."""
@@ -531,75 +593,56 @@ class _Scope(object):
     """One ``scope(...)`` use: a context manager, or a decorator that opens
     a fresh Scope with the same static arguments on every call."""
 
-    def __init__(self, kind, key, label, msg, fields, src, logger):
+    def __init__(self, kind, key, label, msg, fields, src, logger_name):
         self.kind = kind
         self.key = key
         self.label = label
         self.msg = msg
         self.fields = fields
         self.src = src
-        self.logger = logger
-        self.run = None
+        self.logger_name = logger_name
 
     def __call__(self, func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             src, _ = _caller(1)
             with _Scope(self.kind, self.key, self.label, self.msg,
-                        self.fields, src, self.logger):
+                        self.fields, src, self.logger_name):
                 return func(*args, **kwargs)
         return wrapper
 
     def __enter__(self):
-        run = _active_run()
-        if run is None:
-            return self
-        self.run = run
-        self.id = run.next_scope_id()
-        self.parent = list(_scope_path())
         self.start = time.time()
-        extra = {"id": self.id, "kind": self.kind}
-        for k in ("key", "label", "fields"):
-            v = getattr(self, k)
-            if v is not None:
-                extra[k] = v
-        run.scope_labels[self.id] = _safe(
-            lambda: scope_label(self.kind, self.key, self.label),
-            str(self.kind))
-        self._write(self.start, "INFO", "scope_start", msg=self.msg,
-                    extra=extra)
-        _scope_state.path = self.parent + [self.id]
+        # The Run's filter fills in "id".
+        self.data = {"type": "scope_start", "msg": self.msg, "id": None,
+                     "kind": self.kind}
+        self.data.update(_given(key=self.key, label=self.label,
+                                fields=self.fields))
+        self._emit(logging.INFO, self.data, None)
         return self
 
     def __exit__(self, etype, evalue, tb):
-        if self.run is None:
-            return False
-        _scope_state.path = self.parent
         end = time.time()
-        extra = {"id": self.id, "outcome": "ok",
-                 "duration_ms": int(round((end - self.start) * 1000))}
+        data = {"type": "scope_end", "msg": None, "id": self.data.get("id"),
+                "outcome": "ok",
+                "duration_ms": int(round((end - self.start) * 1000))}
         exc_info = None
         if etype is not None and not (issubclass(etype, SystemExit)
                                       and evalue.code in (0, None)):
-            extra["outcome"] = "error"
+            data["outcome"] = "error"
             exc_info = (etype, evalue, tb)
-        self._write(end, "ERROR" if exc_info else "INFO", "scope_end",
-                    exc_info=exc_info, extra=extra)
+        self._emit(logging.ERROR if exc_info else logging.INFO, data, exc_info)
         return False
 
-    def _write(self, created, level, rtype, **kw):
-        # Always written, whatever the configured level. Never raises
-        # unless the Run is strict.
-        rec = _build_record(created, level, self.logger, rtype, src=self.src,
-                            scope=self.parent, **kw)
-        try:
-            self.run.handler.write_dict(rec)
-        except Exception:
-            if self.run.strict:
-                raise
-        if self.run.console_handler is not None:
-            self.run.console_handler.write_scope(
-                rec, logging.ERROR if level == "ERROR" else logging.INFO)
+    def _emit(self, level, data, exc_info):
+        # Handled directly, past the loggers' level checks: start and end
+        # records are written whatever the configured level.
+        data["src"] = self.src
+        logger = logging.getLogger(LOGGER_NAME)
+        record = logger.makeRecord(self.logger_name, level, self.src, 0,
+                                   "%s %s", (data["type"], self.kind),
+                                   exc_info, extra={ATTR: data})
+        logger.handle(record)
 
 
 def _safe(fn, default):
@@ -631,7 +674,7 @@ def _console_level(console):
 
 class _Run(object):
     def __init__(self, path, mode, title, description, target, fields,
-                 level, console, encoders, strict, max_text, overwrite):
+                 level, console, encoders, max_text, overwrite):
         if mode not in MODES:
             raise ValueError("mode must be 'dry' or 'write', got %r" % (mode,))
         self.path = path
@@ -643,37 +686,26 @@ class _Run(object):
         self.level = level
         self.console = console
         self.encoders = dict(encoders or {})
-        self.strict = strict
         self.max_text = max_text
         self.overwrite = overwrite
+        self.filter = RunFilter(self)
         self.handler = None
         self.console_handler = None
-        self.scope_labels = {}  # Scope id -> console label
         self.stream = None
         self.log = None
-        self._scope_ids = 0
-        self._scope_lock = threading.Lock()
-
-    def next_scope_id(self):
-        with self._scope_lock:
-            self._scope_ids += 1
-            return self._scope_ids
 
     def __enter__(self):
-        global _active
-        with _lock:
-            if _active is not None:
-                raise RuntimeError("dbfixlog.run() is already active; "
-                                   "nested Runs are not supported")
-            self.start = time.time()
-            self.path = self.path.replace("{ts}", _path_ts(self.start))
-            self.stream = open(self.path, "w" if self.overwrite else "x",
-                               encoding="utf-8")
-            _active = self
+        root = logging.getLogger()
+        if any(isinstance(h, JsonlHandler) for h in root.handlers):
+            raise RuntimeError("dbfixlog.run() is already active; "
+                               "nested Runs are not supported")
+        self.start = time.time()
+        self.path = self.path.replace("{ts}", _path_ts(self.start))
+        self.stream = open(self.path, "w" if self.overwrite else "x",
+                           encoding="utf-8")
         try:
             self.handler = JsonlHandler(self.stream, self, self.level)
-            self.handler.addFilter(ScopeFilter())
-            root = logging.getLogger()
+            self.handler.addFilter(self.filter)
             self._root_level = root.level
             root.addHandler(self.handler)
             lowest = self.level
@@ -681,19 +713,17 @@ class _Run(object):
             if console is not None:
                 self.console_handler = ConsoleHandler(sys.stderr, self,
                                                       console)
-                self.console_handler.addFilter(ScopeFilter())
+                self.console_handler.addFilter(self.filter)
                 root.addHandler(self.console_handler)
                 lowest = min(lowest, console)
             if root.level > lowest or root.level == logging.NOTSET:
                 root.setLevel(lowest)
             header = {"format": FORMAT_VERSION, "mode": self.mode}
-            for k in ("title", "description", "target", "fields"):
-                v = getattr(self, k)
-                if v is not None:
-                    header[k] = v
+            header.update(_given(title=self.title, description=self.description,
+                                 target=self.target, fields=self.fields))
             self.handler.write_dict(_build_record(
                 self.start, "INFO", LOGGER_NAME, "run_start", extra=header))
-            self.log = RunLogger(logging.getLogger("__main__"))
+            self.log = RunLogger(logging.getLogger("__main__"), self)
         except BaseException:
             self._teardown()
             raise
@@ -729,7 +759,6 @@ class _Run(object):
         return False
 
     def _teardown(self):
-        global _active
         root = logging.getLogger()
         if self.handler is not None:
             root.removeHandler(self.handler)
@@ -740,14 +769,16 @@ class _Run(object):
             self.console_handler.close()
         if self.stream is not None:
             self.stream.close()
-        with _lock:
-            if _active is self:
-                _active = None
 
 
 def run(path, *, mode, title=None, description=None, target=None, fields=None,
-        level=logging.DEBUG, console=logging.INFO, encoders=None, strict=False,
-        max_text=1000, overwrite=False):
+        level=logging.DEBUG, console=logging.INFO, encoders=None,
+        max_text=DEFAULT_MAX_TEXT, overwrite=False):
     """Open a Run: ``with dbfixlog.run(path, mode="dry") as log: ...``."""
     return _Run(path, mode, title, description, target, fields, level,
-                console, encoders, strict, max_text, overwrite)
+                console, encoders, max_text, overwrite)
+
+
+# Scope records go through this logger; without a handler of its own, the
+# stdlib's last-resort handler would print error Scope ends outside a Run.
+logging.getLogger(LOGGER_NAME).addHandler(logging.NullHandler())

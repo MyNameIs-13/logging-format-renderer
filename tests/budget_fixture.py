@@ -1,4 +1,4 @@
-"""Budget fixture generator (SPEC §7): a Log File with realistic entropy.
+"""Budget fixture generator: a Log File with realistic entropy.
 
 Written through dbfixlog.py itself, so generating it also exercises the writer end to end.
 It produces random ids, names and free text, mixed field counts, Scopes nested up to four
@@ -123,19 +123,23 @@ def generate(path, n, seed=0):
     """Write a Write Run of about ``n`` records (never fewer) to ``path``."""
     g = _Gen(n, seed)
     clock = _Clock(seed)
-    real = time.time, time.time_ns
-    time.time, time.time_ns = clock.time, clock.time_ns
+    # logging stamps records with time.time() on 3.6 and time.time_ns() on newer Pythons.
+    names = [name for name in ("time", "time_ns") if hasattr(time, name)]
+    real = [getattr(time, name) for name in names]
+    for name in names:
+        setattr(time, name, getattr(clock, name))
     try:
         _write(path, n, seed, g)
     finally:
-        time.time, time.time_ns = real
+        for name, fn in zip(names, real):
+            setattr(time, name, fn)
     return path
 
 
 def _write(path, n, seed, g):
     r = g.r
     with dbfixlog.run(path, mode="write", title="Budget fixture %d" % n, console=False,
-                      overwrite=True, description="Synthetic Log File for the SPEC §7 budgets",
+                      overwrite=True, description="Synthetic Log File for the load and search budgets",
                       target={"database": "shop_bench", "host": "db-%d" % seed},
                       fields={"seed": seed, "records": n}) as log:
         sync = dbfixlog.get_logger("shop.sync")

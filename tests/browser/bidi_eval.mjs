@@ -1,9 +1,11 @@
 // Drive headless Firefox over WebDriver BiDi: open a URL, poll a JS expression until it
 // yields a non-empty string (or time runs out), print that string on stdout.
-// Usage: node bidi_eval.mjs WS_URL PAGE_URL EXPRESSION [TIMEOUT_MS]
+// Usage: node bidi_eval.mjs WS_URL PAGE_URL EXPRESSION [TIMEOUT_MS] [PRELOAD]
+// PRELOAD, if given, is a JS function declaration run in the page before any of its own
+// scripts (WebDriver BiDi script.addPreloadScript), e.g. to observe the page from its start.
 // Uncaught JS errors and console.error calls on the page are printed on stderr as one line
 // "js-errors: [...]" (JSON array of messages); they do not change the exit code.
-const [wsUrl, pageUrl, expression, timeoutArg] = process.argv.slice(2);
+const [wsUrl, pageUrl, expression, timeoutArg, preload] = process.argv.slice(2);
 const timeoutMs = Number(timeoutArg || 10000);
 
 const ws = new WebSocket(wsUrl.replace(/\/?$/, "/session"));
@@ -34,6 +36,10 @@ const tree = await send("browsingContext.getTree", {});
 const context = tree.result.contexts[0].context;
 since = Date.now();
 await send("session.subscribe", { events: ["log.entryAdded"], contexts: [context] });
+if (preload) {
+  const p = await send("script.addPreloadScript", { functionDeclaration: preload, contexts: [context] });
+  if (p.type === "error") { await send("session.end", {}); fail("addPreloadScript: " + p.message); }
+}
 const nav = await send("browsingContext.navigate", { context, url: pageUrl, wait: "complete" });
 if (nav.type === "error") { await send("session.end", {}); fail("navigate: " + nav.message); }
 

@@ -1,4 +1,4 @@
-// Report viewer for Database Fix Logging. Plain script: no modules, no build step.
+// Report code for Database Fix Logging. Plain script: no modules, no build step.
 // dbfixlog_render.py inlines this file (and report.css) into every Report.
 //
 // ---------------------------------------------------------------------------------------
@@ -14,37 +14,31 @@
 //
 //   {
 //     "payload":    1,              // shape version of this object; bumped on breaking change
-//     "renderer":   "0.1.0",        // dbfixlog_render.py __version__
 //     "source":     "run.jsonl",    // Log File name (basename)
 //     "title":      "...",          // resolved: --title, then run_start.title, then source
-//     "unfinished": false,          // true when no run_end record is present
 //     "notices":    [Notice, ...],  // render-time notices, in the order below; may be []
 //     "records":    [Record, ...],  // every well-formed record, in file order, verbatim
 //     "lines":      [1, 2, 4, ...]  // lines[i] = 1-based Log File line of records[i]
 //   }
 //
 // records[0] is always the run_start (Run Header); the renderer refuses anything else.
-// Records are the Log File's JSON objects unchanged (SPEC §3), including unknown types.
+// Records are the Log File's JSON objects unchanged, including unknown types.
 // A record's id within the Report is its index i; its line number is lines[i] (the two
 // differ when malformed lines were skipped).
 //
 // Every Notice has "kind" and a human-readable "message"; show the message for unknown
 // kinds. Known kinds:
 //
-//   {"kind": "newer_minor", "format": "1.7", "reads": "1.0", "message": "..."}
+//   {"kind": "newer_minor", "message": "..."}
 //       The Log File's minor format is newer than the renderer knows.
-//   {"kind": "malformed_lines", "count": 3, "lines": [3, 5, 7],
+//   {"kind": "malformed_lines", "lines": [3, 5, 7],
 //    "samples": [{"line": 3, "text": "not json"}, ...],   // first 5, each <= 200 chars
 //    "message": "3 malformed lines skipped"}
-//       Lines that were not JSON objects were skipped (only without --strict).
+//       Lines that were not JSON objects were skipped (only without --strict). The notice
+//       shows the line numbers and the samples.
 //   {"kind": "incomplete_last_line", "line": 10,
 //    "message": "last line incomplete, file may still be written"}
-//       The last line had no trailing newline and was skipped.
-//
-// The page also exposes its state for tests on <html>: data-state = "loading" | "ready" |
-// "error", data-record-count, and data-error (on error). Once ready, window.dbfixlogReport
-// is {model, list, filter, onQuery, timing} (see renderReport and startReport): the seam later
-// tickets hook into. timing = {decode, render, ready, nav} in ms; <html data-ready-ms> too.
+//       The last line had no trailing newline and did not parse, so it was skipped.
 // ---------------------------------------------------------------------------------------
 
 async function decodePayload(base64Text) {
@@ -52,7 +46,7 @@ async function decodePayload(base64Text) {
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
   // Copy the inflated chunks into one buffer sized from the gzip trailer (ISIZE, the
   // uncompressed size mod 2^32), then decode once. At 100k records this is ~2x faster in
-  // Firefox than Response.text() or .arrayBuffer() (ticket 11). The buffer still grows if
+  // Firefox than Response.text() or .arrayBuffer(). The buffer still grows if
   // the hint is short.
   const n = bytes.length < 18 ? 0 : (bytes[bytes.length - 4] | bytes[bytes.length - 3] << 8 |
     bytes[bytes.length - 2] << 16 | bytes[bytes.length - 1] << 24) >>> 0;
@@ -82,11 +76,11 @@ function base64Bytes(text) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Model (pure; exported for Node)
+// Model (pure)
 // ---------------------------------------------------------------------------------------
 // buildModel(payload) derives everything the views need from the verbatim records.
 // A record's id is its index i into model.records. Per-record derived data lives in
-// parallel arrays (model.lv, model.warn) so the records themselves stay verbatim.
+// parallel arrays (model.warn, model.odd) so the records themselves stay verbatim.
 
 function buildModel(payload) {
   const records = payload.records;
@@ -143,6 +137,10 @@ function buildModel(payload) {
       m.warnings.push(i);
     }
   }
+  // Known types with missing or odd fields: odd[i] is a reason string or null.
+  m.odd = records.map(oddFields);
+  m.oddRecords = [];
+  for (let i = 0; i < records.length; i++) if (m.odd[i]) m.oddRecords.push(i);
   m.unfinished = m.end === null;
   m.outcome = m.end ? m.end.outcome : "unfinished";
   m.unfinishedScopes = [];
@@ -159,10 +157,46 @@ function buildModel(payload) {
   return m;
 }
 
+// What is missing or odd about a record of a known type, or null. Such a record is still
+// shown as well as possible, with this reason as a warning.
+function oddFields(r) {
+  const out = [];
+  const has = (k) => r[k] !== undefined && r[k] !== null;
+  const oneOf = (k, allowed) => {
+    if (!has(k)) out.push("no " + k);
+    else if (allowed.indexOf(r[k]) < 0) out.push(k + " " + JSON.stringify(r[k]));
+  };
+  switch (r.type) {
+    case "change":
+      oneOf("op", CHANGE_OPS);
+      oneOf("status", CHANGE_STATUSES);
+      if (typeof r.table !== "string") out.push("no table");
+      if (has("key") && !isPlainObject(r.key)) out.push("key is not a {column: value} object");
+      else if (!has("key") && r.op !== "insert") out.push("no key");
+      if (r.op === "update" && !isPlainObject(r.changes)) out.push("update without changes");
+      break;
+    case "finding":
+      if (typeof r.check !== "string" || !r.check) out.push("no check");
+      break;
+    case "message":
+      if (!has("msg")) out.push("no msg");
+      break;
+    case "scope_start":
+      if (!has("id")) out.push("no id");
+      if (!has("kind")) out.push("no kind");
+      break;
+    case "scope_end":
+      if (!has("id")) out.push("no id");
+      oneOf("outcome", ["ok", "error"]);
+      break;
+  }
+  return out.length ? out.join("; ") : null;
+}
+
 function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
 
 // The full-width Dry Run strip, or null for a Write Run. It only claims what the Log File
-// shows. q is the query a "Show them" link should apply (wired by the filter bar, ticket 08).
+// shows. q is the query a "Show them" link should apply (wired by the filter bar).
 function modeStrip(m) {
   if (m.mode !== "dry") return null;
   const n = m.warnings.length;
@@ -203,12 +237,28 @@ function runNotices(m) {
     out.push({ kind: "unfinished_scopes", tone: "amber", q: "is:unfinished",
       text: plural(m.unfinishedScopes.length, "Scope", "Scopes") + " unfinished (no scope_end record)." });
   }
+  if (m.oddRecords.length) {
+    const lines = m.oddRecords.map((i) => m.lines[i]);
+    out.push({ kind: "odd_fields", tone: "amber",
+      text: plural(lines.length, "record has", "records have") + " missing or odd fields (line" +
+        (lines.length === 1 ? " " : "s ") + lines.slice(0, 20).join(", ") + (lines.length > 20 ? ", …" : "") +
+        "); they are shown as well as possible, marked ⚠." });
+  }
   for (const n of given) out.push(givenNotice(n));
   return out;
 }
 
+// A render-time notice: its message, plus the line numbers and first bad lines verbatim
+// for skipped lines, or the line number of an incomplete last line.
 function givenNotice(n) {
-  return { kind: n.kind, tone: "amber", text: String(n.message), source: n };
+  let text = String(n.message);
+  if (Array.isArray(n.lines) && n.lines.length) {
+    text += " (line" + (n.lines.length === 1 ? " " : "s ") + n.lines.slice(0, 20).join(", ") +
+      (n.lines.length > 20 ? ", …" : "") + ")";
+  } else if (typeof n.line === "number") {
+    text += " (line " + n.line + ")";
+  }
+  return { kind: n.kind, tone: "amber", text: text, samples: Array.isArray(n.samples) ? n.samples : [] };
 }
 
 // Time column and notices use UTC: the hh:mm:ss.mmm slice of ts.
@@ -216,7 +266,7 @@ function hms(ts) { return typeof ts === "string" ? ts.slice(11, 23) : ""; }
 
 // ---------------------------------------------------------------------------------------
 // Row lists (pure). A row is a record index: a scope_start index is that Scope's header
-// row, any other index is an entry. Ticket 08 adds filtering and pruning on top of these.
+// row, any other index is an entry. filterRows adds filtering and pruning on top of these.
 // ---------------------------------------------------------------------------------------
 
 function isHeader(m, i) {
@@ -255,15 +305,15 @@ function flatRows(m) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Filters and search (ticket 08; pure). SPEC §6.3 pruning rule, §6.4 query syntax.
+// Filters and search (pure): the Scope-header pruning rule and the query syntax.
 // ---------------------------------------------------------------------------------------
 // A filter state is {view, q, level}:
 //   view:  "all" | "changes" | "findings" | "errors"   (default "all")
 //   q:     the search box text (default "")
 //   level: the level ≥ dropdown, a LEVELS name (default "DEBUG", meaning no level filter)
-// filterRows(m, state, mode, collapsed) returns {rows, active, matches, shown, ms}:
+// filterRows(m, state, mode, collapsed) returns {rows, active, matches, shown}:
 //   rows:    record indices to show, in file order
-//   active:  whether a filter is active (§6.3); when false, rows are treeRows/flatRows
+//   active:  whether a filter is active; when false, rows are treeRows/flatRows
 //   matches: how many rows match the filter themselves (enclosing headers kept for the
 //            tree path are not counted)
 //   shown:   Map of Scope id -> matching entries inside it (any depth), or null when no
@@ -370,7 +420,7 @@ function searchIndex(m) {
   const n = recs.length;
   const hay = new Array(n);
   const keyText = new Array(n);
-  const lv = new Uint8Array(n);
+  const levelOf = new Uint8Array(n);
   const time = new Array(n);
   for (let i = 0; i < n; i++) {
     const r = recs[i];
@@ -378,12 +428,12 @@ function searchIndex(m) {
     keyText[i] = r.key === undefined ? "" : pairsText(r.key).toLowerCase();
     if (isHeader(m, i)) {
       const s = m.scopes.get(r.id);
-      lv[i] = s.outcome === "error" ? LEVELS.ERROR : levelValue(r.level);
+      levelOf[i] = s.outcome === "error" ? LEVELS.ERROR : levelValue(r.level);
       hay[i] = (textOf(r.kind) + " " + keyText[i] + " " + pairsText(r.label) + " " + textOf(r.msg) + " " +
         (s.outcome === "error" ? "scope error" : String(r.level || "").toLowerCase())).toLowerCase();
       continue;
     }
-    lv[i] = levelValue(r.level);
+    levelOf[i] = levelValue(r.level);
     let h = keyText[i] + " " + pairsText(r.label) + " " + pairsText(r.fields) + " ";
     if (isPlainObject(r.changes)) {
       for (const f in r.changes) {
@@ -402,7 +452,7 @@ function searchIndex(m) {
     scopeKey.set(s.id, keyText[s.start]);
     scopeHay.set(s.id, (textOf(r.kind) + " " + keyText[s.start] + " " + pairsText(r.label)).toLowerCase());
   }
-  m.search = { hay: hay, keyText: keyText, lv: lv, time: time, scopeHay: scopeHay, scopeKey: scopeKey };
+  m.search = { hay: hay, keyText: keyText, levelOf: levelOf, time: time, scopeHay: scopeHay, scopeKey: scopeKey };
   return m.search;
 }
 
@@ -452,14 +502,6 @@ function compileFilter(m, state) {
 
 function lc(v) { return typeof v === "string" ? v.toLowerCase() : v === undefined || v === null ? "" : String(v).toLowerCase(); }
 
-function tableMatches(set, table) {
-  const t = lc(table);
-  if (!t) return false;
-  if (set.has(t)) return true;
-  const dot = t.lastIndexOf("."); // table:orders also finds shop.orders
-  return dot >= 0 && set.has(t.slice(dot + 1));
-}
-
 // The Scopes a row sits in for matching: its scope path, plus the Scope itself for that
 // Scope's own start (header) and end records.
 function rowScopes(r) {
@@ -473,9 +515,9 @@ function matchRow(m, i, F) {
   const r = m.records[i];
   const ix = F.ix;
   const header = isHeader(m, i);
-  if (F.minLevel && ix.lv[i] < F.minLevel) return false;
+  if (F.minLevel && ix.levelOf[i] < F.minLevel) return false;
   if (F.levels) {
-    const name = header ? (ix.lv[i] === LEVELS.ERROR ? "ERROR" : String(r.level).toUpperCase()) : String(r.level).toUpperCase();
+    const name = header ? (ix.levelOf[i] === LEVELS.ERROR ? "ERROR" : String(r.level).toUpperCase()) : String(r.level).toUpperCase();
     if (!F.levels.has(LEVEL_ALIASES[name] || name)) return false;
   }
   if (F.viewType && r.type !== F.viewType) return false;
@@ -485,7 +527,7 @@ function matchRow(m, i, F) {
   if (header) {
     if (F.tables || F.ops || F.statuses || F.checks || F.fields.length) return false;
   } else {
-    if (F.tables && !tableMatches(F.tables, r.table)) return false;
+    if (F.tables && !F.tables.has(lc(r.table))) return false;
     if (F.ops && !F.ops.has(lc(r.op))) return false;
     if (F.statuses && !F.statuses.has(lc(r.status))) return false;
     if (F.checks && !F.checks.has(lc(r.check))) return false;
@@ -506,8 +548,11 @@ function matchRow(m, i, F) {
     if (!any) return false;
   }
   if (F.kinds) {
+    // A Scope's own records match on its own kind, so kind:K lists exactly the Scopes of
+    // kind K; any other record matches on the kinds of the Scopes it sits in.
     let any = false;
-    for (const id of sc) if (F.scopeKind.has(id)) { any = true; break; }
+    if (r.type === "scope_start" || r.type === "scope_end") any = F.scopeKind.has(r.id);
+    else for (const id of sc) if (F.scopeKind.has(id)) { any = true; break; }
     if (!any) return false;
   }
   if (F.keys.length) {
@@ -545,11 +590,10 @@ function fieldsMatch(r, terms) {
 }
 
 function filterRows(m, state, mode, collapsed) {
-  const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
   const F = compileFilter(m, state);
   const coll = collapsed || new Set();
   const flat = mode === "flat";
-  const out = { rows: null, active: F.active, matches: 0, shown: null, filter: F, ms: 0 };
+  const out = { rows: null, active: F.active, matches: 0, shown: null };
   if (!F.active) {
     out.rows = flat ? flatRows(m) : treeRows(m, coll);
     out.matches = out.rows.length;
@@ -585,7 +629,6 @@ function filterRows(m, state, mode, collapsed) {
     out.matches = matches;
     out.shown = shown;
   }
-  out.ms = (typeof performance !== "undefined" ? performance.now() : Date.now()) - t0;
   return out;
 }
 
@@ -605,7 +648,7 @@ function viewCounts(m) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Summary cards (ticket 09; pure)
+// Summary cards (pure)
 // ---------------------------------------------------------------------------------------
 // summaryCounts(m) -> {changes, findings, kinds}:
 //   changes:  {rows: [{table, op, planned, applied, failed, all}], total: {planned, applied, failed, all}}
@@ -643,11 +686,11 @@ function summaryCounts(m) {
   }
   const opRank = (op) => { const k = CHANGE_OPS.indexOf(op); return k < 0 ? CHANGE_OPS.length : k; };
   const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-  const crows = Array.from(changes.values()).sort((a, b) =>
+  const changeRows = Array.from(changes.values()).sort((a, b) =>
     cmp(a.table, b.table) || opRank(a.op) - opRank(b.op) || cmp(a.op, b.op));
-  const lv = Array.from(levels).sort((a, b) => (LEVELS[a] || 99) - (LEVELS[b] || 99) || cmp(a, b));
-  const frows = Array.from(checks.values()).sort((a, b) => cmp(a.check, b.check));
-  for (const row of frows) for (const l of lv) row[l] = row[l] || 0;
+  const findingLevels = Array.from(levels).sort((a, b) => (LEVELS[a] || 99) - (LEVELS[b] || 99) || cmp(a, b));
+  const findingRows = Array.from(checks.values()).sort((a, b) => cmp(a.check, b.check));
+  for (const row of findingRows) for (const l of findingLevels) row[l] = row[l] || 0;
   const kinds = new Map();
   for (const s of m.scopes.values()) {
     const kind = textOf(s.kind);
@@ -657,7 +700,7 @@ function summaryCounts(m) {
     if (s.outcome === "error") k.error++;
     else if (s.outcome === "unfinished") k.unfinished++;
   }
-  return { changes: { rows: crows, total: total }, findings: { levels: lv, rows: frows }, kinds: Array.from(kinds.values()) };
+  return { changes: { rows: changeRows, total: total }, findings: { levels: findingLevels, rows: findingRows }, kinds: Array.from(kinds.values()) };
 }
 
 // A query value, quoted when it holds whitespace (queryTokens groups on double quotes).
@@ -677,7 +720,7 @@ function cardNum(n, q, red) {
     n.toLocaleString("en") + "</a></td>";
 }
 
-// The foldable summary cards (SPEC §6.2 item 3), or "" when there is nothing to count.
+// The foldable summary cards, or "" when there is nothing to count.
 // Failed Changes are red when non-zero; applied ones too in a Dry Run.
 function cardsHTML(m) {
   const c = summaryCounts(m);
@@ -702,12 +745,12 @@ function cardsHTML(m) {
     cards.push('<div class="card" data-card="changes"><h4>Changes</h4><table>' + head + body + foot + "</table></div>");
   }
   if (c.findings.rows.length) {
-    const lv = c.findings.levels;
-    const head = "<tr><th>check</th>" + lv.map((l) => "<th>" + esc(l.toLowerCase()) + "</th>").join("") + "<th>all</th></tr>";
+    const levels = c.findings.levels;
+    const head = "<tr><th>check</th>" + levels.map((l) => "<th>" + esc(l.toLowerCase()) + "</th>").join("") + "<th>all</th></tr>";
     const body = c.findings.rows.map((r) => {
       const ck = queryTerm("check", r.check);
       return '<tr><td class="mono">' + esc(r.check) + "</td>" +
-        lv.map((l) => cardNum(r[l], joinTerms([ck, queryTerm("level", l.toLowerCase())]), levelValue(l) >= LEVELS.ERROR)).join("") +
+        levels.map((l) => cardNum(r[l], joinTerms([ck, queryTerm("level", l.toLowerCase())]), levelValue(l) >= LEVELS.ERROR)).join("") +
         cardNum(r.all, ck, false) + "</tr>";
     }).join("");
     cards.push('<div class="card" data-card="findings"><h4>Findings</h4><table>' + head + body + "</table></div>");
@@ -798,9 +841,9 @@ function badge(cls, text, title) {
   return '<span class="b ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : "") + ">" + esc(text) + "</span>";
 }
 
-function levelBadge(level) {
+function levelBadge(level, odd) {
   const l = String(level || "");
-  return badge("lvb-" + (l in LEVELS ? l : "other"), l.toLowerCase());
+  return badge("lvb-" + (l in LEVELS ? l : "other") + (odd ? " st-odd" : ""), l.toLowerCase() + (odd ? " ⚠" : ""), odd);
 }
 
 function statusHTML(m, i) {
@@ -811,14 +854,18 @@ function statusHTML(m, i) {
     if (o === "unfinished") return badge("st-unfinished", "unfinished", "no scope_end record");
     return "";
   }
-  if (r.type === "scope_end") return badge("st-scope-error", "scope error");
+  const odd = m.odd[i];
+  if (r.type === "scope_end") return badge("st-scope-error", "scope error" + (odd ? " ⚠" : ""), odd);
   if (r.type === "change") {
     const w = m.warn[i];
+    // In a Dry Run an applied or failed Change is red with ⚠. A planned one in a Write Run
+    // only gets the Run-level notice.
     if (w && m.mode === "dry") return badge("st-mismatch", r.status + " ⚠", w);
-    if (w) return badge("st-" + r.status + " st-warn", r.status + " ⚠", w);
-    return badge("st-" + r.status, r.status);
+    const status = r.status === undefined || r.status === null ? "no status" : String(r.status);
+    if (odd) return badge("st-odd", status + " ⚠", odd);
+    return badge("st-" + status, status);
   }
-  return levelBadge(r.level);
+  return levelBadge(r.level, odd);
 }
 
 // Derived totals for a Scope header: records, planned/applied/failed, Findings, duration.
@@ -845,21 +892,16 @@ function detailsHTML(m, i, shown) {
   }
   switch (r.type) {
     case "change": {
-      let h = "";
-      if (isPlainObject(r.changes)) {
-        h = Object.keys(r.changes).map((f) => {
-          const c = isPlainObject(r.changes[f]) ? r.changes[f] : {};
-          return '<span class="fld">' + esc(f) + ":</span> " + valueHTML(c.old) +
-            '<span class="arrow"> → </span>' + valueHTML(c.new);
-        }).join("  ");
-      }
+      let h = changeEntries(r).map(([f, c]) =>
+        '<span class="fld">' + esc(f) + ":</span> " + valueHTML(c.old) +
+        '<span class="arrow"> → </span>' + valueHTML(c.new)).join("  ");
       if (isPlainObject(r.error)) {
         h += (h ? " " : "") + '<span class="out-error">' + esc(r.error.type) + ": " + esc(r.error.message) + "</span>";
       }
       return h + (h ? msg : msg.slice(1));
     }
     case "finding":
-      return '<span class="chk">' + esc(r.check) + "</span>" + msg;
+      return r.check === undefined ? msg.slice(1) : '<span class="chk">' + esc(r.check) + "</span>" + msg;
     case "scope_end": {
       const e = r.exc || {};
       return '<span class="out-error">' + esc(scopeName(m, r.id)) + " raised " + esc(e.type || "") +
@@ -870,6 +912,12 @@ function detailsHTML(m, i, shown) {
     default: // unknown type: generic row
       return '<span class="dim">' + esc(r.type) + ":</span>" + msg + fieldsHTML(r.fields, true);
   }
+}
+
+// A Change's field changes as [field, {old, new}] pairs; [] when it has none.
+function changeEntries(r) {
+  if (!isPlainObject(r.changes)) return [];
+  return Object.keys(r.changes).map((f) => [f, isPlainObject(r.changes[f]) ? r.changes[f] : {}]);
 }
 
 function fieldsHTML(f, lead) {
@@ -943,7 +991,7 @@ function isEntry(r) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Folding, sticky Scopes, details panel, column widths (pure; ticket 10)
+// Folding, sticky Scopes, details panel, column widths (pure)
 // ---------------------------------------------------------------------------------------
 
 // The collapsed set for a fold button: "all" folds every Scope, "phases" folds every entity
@@ -1036,15 +1084,14 @@ function recordDetailsHTML(m, i) {
   }
   h += kvRow("line", '<span class="mono">' + esc(m.lines[i]) + "</span>");
   if (m.warn[i]) h += kvRow("warning", '<span class="out-error">⚠ ' + esc(m.warn[i]) + "</span>");
+  if (m.odd[i]) h += kvRow("warning", '<span class="out-error">⚠ ' + esc(m.odd[i]) + "</span>");
   h += "</table>";
   if (isPlainObject(r.changes)) {
     h += '<section><b>Field changes</b><table class="fchanges">' +
       '<thead><tr><th>field</th><th>old</th><th></th><th>new</th></tr></thead><tbody>' +
-      Object.keys(r.changes).map((f) => {
-        const c = isPlainObject(r.changes[f]) ? r.changes[f] : {};
-        return '<tr><td class="mono">' + esc(f) + "</td><td>" + valueHTML(c.old) +
-          '</td><td class="arrow">→</td><td>' + valueHTML(c.new) + "</td></tr>";
-      }).join("") + "</tbody></table></section>";
+      changeEntries(r).map(([f, c]) =>
+        '<tr><td class="mono">' + esc(f) + "</td><td>" + valueHTML(c.old) +
+        '</td><td class="arrow">→</td><td>' + valueHTML(c.new) + "</td></tr>").join("") + "</tbody></table></section>";
   }
   if (isPlainObject(r.error)) {
     h += '<section><b class="out-error">' + esc(r.error.type) + "</b>: " + esc(r.error.message) + "</section>";
@@ -1125,8 +1172,11 @@ function noticesHTML(m) {
       (s.q ? ' <a href="#" data-q="' + esc(s.q) + '">Show them</a>' : "") + "</div>";
   }
   for (const n of runNotices(m)) {
-    h += '<div class="notice" data-kind="' + esc(n.kind) + '" data-tone="' + n.tone + '">' + esc(n.text) +
-      (n.q ? ' <a href="#" data-q="' + esc(n.q) + '">show</a>' : "") + "</div>";
+    h += '<div class="notice" data-tone="' + n.tone + '">' + esc(n.text) +
+      (n.q ? ' <a href="#" data-q="' + esc(n.q) + '">show</a>' : "") +
+      (n.samples && n.samples.length ? '<ul class="samples">' + n.samples.map((x) =>
+        '<li><span class="dim">line ' + esc(x.line) + '</span> <code>' + esc(x.text) + "</code></li>").join("") +
+        "</ul>" : "") + "</div>";
   }
   return h;
 }
@@ -1135,7 +1185,7 @@ const ROW_HEIGHT = 24;
 const DEFAULT_WIDTHS = [96, 200, 96, 64, 110, 150, 130, 400];
 
 // The fixed-height virtual list. rowSource(model, mode, collapsed) returns the row indices;
-// ticket 08 replaces it to filter. setWidths() is the hook for column resizing (ticket 10).
+// the filter bar replaces it to filter. setWidths() is the hook for column resizing.
 function createList(doc, wrap, m) {
   wrap.innerHTML = '<div class="lhead"><div class="grid">' +
     COLUMNS.map((c, k) => '<div class="hc" data-col="' + k + '">' + c + "</div>").join("") +
@@ -1195,7 +1245,7 @@ function createList(doc, wrap, m) {
 }
 
 // ---------------------------------------------------------------------------------------
-// DOM: details panel, column resizing, sticky Scopes, fold buttons (ticket 10)
+// DOM: details panel, column resizing, sticky Scopes, fold buttons
 // ---------------------------------------------------------------------------------------
 // installListTools(doc, app, report) wraps the list in .main next to an <aside class="panel">,
 // overlays .stick on the list, adds resize handles to the header cells and puts the fold
@@ -1222,7 +1272,7 @@ function installListTools(doc, app, report) {
   panel.className = "panel";
   panel.hidden = true;
   main.appendChild(panel);
-  // Fold buttons go in the filter bar's .fold-slot (ticket 08), else in their own #treetools.
+  // Fold buttons go in the filter bar's .fold-slot, else in their own #treetools.
   const btns = '<span class="treebtns">' +
     '<button type="button" data-foldall="none" title="Expand all Scopes">Expand all</button>' +
     '<button type="button" data-foldall="phases" title="Fold entity Scopes, keep phases open">Fold to phases</button>' +
@@ -1361,14 +1411,13 @@ function installListTools(doc, app, report) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Filter bar (ticket 08; browser only). Views with counts, search box, level ≥, Tree/Flat.
+// Filter bar (browser only). Views with counts, search box, level ≥, Tree/Flat.
 // ---------------------------------------------------------------------------------------
-// createFilterBar returns the filter API (window.dbfixlogReport.filter):
-//   get()          -> a copy of the state {view, q, level} (see filterRows)
+// createFilterBar returns the filter API:
 //   set(partial)   -> merges into the state, updates the controls and refreshes the list
 //   query(q)       -> shows exactly what q matches: view All, level DEBUG, search box q.
-//                     Notice links and summary-card numbers (ticket 09) use this.
-//   last           -> the latest filterRows result {rows, active, matches, shown, ms}
+//                     Notice links and summary-card numbers use this.
+//   last           -> the latest filterRows result {rows, active, matches, shown}
 // It installs itself as list.rowSource and sets list.shown for "k of n shown".
 
 const VIEW_LABELS = { all: "All", changes: "Changes", findings: "Findings", errors: "Errors" };
@@ -1395,7 +1444,7 @@ const SEARCH_HELP =
 
 function filterBarHTML(m) {
   const c = viewCounts(m);
-  const lv = Object.keys(LEVELS);
+  const levels = Object.keys(LEVELS);
   return '<div class="fbar">' +
     '<span class="seg views">' + VIEWS.map((v) =>
       '<button type="button" data-view="' + v + '" class="' + (v === "all" ? "on" : "") +
@@ -1405,12 +1454,12 @@ function filterBarHTML(m) {
     'placeholder="search… e.g. acme status:failed, key:156, f.city=gent">' +
     '<details class="qhelp"><summary title="search help">?</summary><div class="qhelp-body">' + SEARCH_HELP +
     "</div></details>" +
-    '<label class="lvl">level ≥ <select name="level">' + lv.map((l) =>
+    '<label class="lvl">level ≥ <select name="level">' + levels.map((l) =>
       '<option value="' + l + '">' + (l === "DEBUG" ? "all" : l.toLowerCase()) + "</option>").join("") +
     "</select></label>" +
     '<span class="seg modes"><button type="button" data-mode="tree" class="on">Tree</button>' +
     '<button type="button" data-mode="flat">Flat</button></span>' +
-    '<span class="fold-slot"></span>' + // fold buttons (ticket 10)
+    '<span class="fold-slot"></span>' + // fold buttons
     '<span class="fcount dim"></span></div>';
 }
 
@@ -1423,8 +1472,6 @@ function createFilterBar(doc, bar, list, m, listEl) {
   let timer = 0;
   const filter = {
     last: null,
-    indexMs: null,
-    get() { return Object.assign({}, state); },
     set(partial) {
       clearTimeout(timer);
       state = normState(Object.assign({}, state, partial));
@@ -1438,7 +1485,7 @@ function createFilterBar(doc, bar, list, m, listEl) {
     for (const b of bar.querySelectorAll("[data-view]")) b.classList.toggle("on", b.dataset.view === state.view);
     for (const b of bar.querySelectorAll("[data-mode]")) b.classList.toggle("on", b.dataset.mode === list.mode);
     const fold = bar.querySelector(".fold-slot");
-    if (fold) fold.hidden = list.mode !== "tree"; // fold buttons (ticket 10) only act in Tree mode
+    if (fold) fold.hidden = list.mode !== "tree"; // fold buttons only act in Tree mode
     select.value = state.level;
     const r = filter.last;
     count.textContent = r.active
@@ -1468,13 +1515,8 @@ function createFilterBar(doc, bar, list, m, listEl) {
     else if (e.key === "Escape") filter.set({ q: "" });
   });
   // Build the search index while idle, so the first keystroke doesn't pay for it.
-  // filter.indexMs records how long that took (for the budget test, ticket 11).
   const idle = doc.defaultView.requestIdleCallback || ((f) => setTimeout(f, 50));
-  idle(() => {
-    const t0 = performance.now();
-    searchIndex(m);
-    filter.indexMs = performance.now() - t0;
-  });
+  idle(() => searchIndex(m));
   return filter;
 }
 
@@ -1482,7 +1524,7 @@ function renderReport(doc, app, payload) {
   const m = buildModel(payload);
   app.innerHTML = '<div class="report">' + runHeaderHTML(m) +
     '<div class="notices">' + noticesHTML(m) + "</div>" +
-    '<div id="cards">' + cardsHTML(m) + '</div><div id="bar"></div>' + // filter bar slot (08)
+    '<div id="cards">' + cardsHTML(m) + '</div><div id="bar"></div>' + // filter bar slot
     '<div class="listwrap"></div></div>';
   const list = createList(doc, app.querySelector(".listwrap"), m);
   const filter = createFilterBar(doc, app.querySelector("#bar"), list, m, app.querySelector(".listwrap .list"));
@@ -1504,36 +1546,13 @@ function renderReport(doc, app, payload) {
 }
 
 async function startReport(doc) {
-  const root = doc.documentElement;
   const app = doc.getElementById("app");
-  root.dataset.state = "loading";
-  const t0 = performance.now();
   try {
     const payload = await decodePayload(doc.getElementById("dbfixlog-payload").textContent);
-    const t1 = performance.now();
-    root.dataset.recordCount = String(payload.records.length);
-    const report = renderReport(doc, app, payload);
-    const t2 = performance.now();
-    // Data ready (SPEC §7): decode + parse + model + first list render, in ms from the
-    // start of this function; nav is the same moment measured from navigation start.
-    report.timing = { decode: t1 - t0, render: t2 - t1, ready: t2 - t0, nav: t2 };
-    root.dataset.readyMs = String(Math.round(t2 - t0));
-    doc.defaultView.dbfixlogReport = report;
-    root.dataset.state = "ready";
+    renderReport(doc, app, payload);
   } catch (e) {
-    root.dataset.error = String(e);
     app.textContent = "Could not load the Report data: " + e;
-    root.dataset.state = "error";
   }
 }
 
-if (typeof document !== "undefined") startReport(document);
-if (typeof module !== "undefined") module.exports = {
-  decodePayload, buildModel, modeStrip, runNotices, isEntry, isHeader, isRow, treeRows, flatRows,
-  rowCells, rowClass, valueHTML, scopeName, hms, duration, esc, LEVELS, COLUMNS,
-  parseQuery, compileFilter, matchRow, filterRows, viewCounts, VIEWS,
-  // ticket 10
-  foldSet, stickyScopes, loadWidths, saveWidths, WIDTHS_KEY, DEFAULT_WIDTHS,
-  // ticket 09
-  summaryCounts, cardsHTML,
-};
+startReport(document);

@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import shutil
@@ -8,23 +7,17 @@ import threading
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import dbfixlog  # noqa: E402
+import helpers  # noqa: E402
+from helpers import read_records  # noqa: E402
 
 THIS_FILE = os.path.basename(__file__)
 
 
-def read_records(path):
-    with open(path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f]
-
-
 def lineno_of(marker):
-    with open(__file__, encoding="utf-8") as f:
-        for i, line in enumerate(f, 1):
-            if marker in line and "lineno_of" not in line:
-                return i
-    raise AssertionError(marker)
+    return helpers.lineno_of(__file__, marker)
 
 
 class ScopeTest(unittest.TestCase):
@@ -68,8 +61,8 @@ class ScopeTest(unittest.TestCase):
         self.assertNotIn("scope", end)
         self.assertNotIn("exc", end)
 
-    def test_nested_scopes_match_spec_example(self):
-        # SPEC 3.6: start/end carry the parent's path, inner records the full path.
+    def test_nested_scopes_carry_parent_and_full_paths(self):
+        # Start/end carry the parent's path, inner records the full path.
         with dbfixlog.run(self.path, mode="dry", console=False) as log:
             log.info("connected")
             with dbfixlog.scope("orphan-check", msg="pass 1"):

@@ -68,7 +68,6 @@ class DefaultRender(RenderCase):
         self.assertEqual(payload["records"][6]["changes"]["note"]["new"],
                          "cleaned <b>&amp;</b> </script> ünïcode")
         self.assertEqual(payload["notices"], [])
-        self.assertFalse(payload["unfinished"])
 
     def test_existing_report_is_overwritten(self):
         log = self.log_from(fixture_lines())
@@ -114,13 +113,13 @@ class Title(RenderCase):
 
 
 class PayloadMeta(RenderCase):
-    def test_payload_names_renderer_version_and_source_file(self):
+    def test_payload_names_its_shape_version_and_source_file(self):
         log = self.log_from(fixture_lines())
         code, out, err = self.render(log, "-o", "-")
         payload = decode_payload(out)
         self.assertEqual(payload["payload"], 1)
-        self.assertRegex(payload["renderer"], r"^\d+\.\d+\.\d+$")
         self.assertEqual(payload["source"], "run.jsonl")
+        self.assertRegex(out, r'<meta name="generator" content="dbfixlog_render \d+\.\d+\.\d+">')
 
 
 class InputHandling(RenderCase):
@@ -129,10 +128,10 @@ class InputHandling(RenderCase):
         self.assertEqual(code, 0, err)
         return decode_payload(out), err
 
-    def test_unfinished_file_renders_and_is_marked_unfinished(self):
+    def test_unfinished_file_renders(self):
         log = self.log_from(fixture_lines()[:-1])
         payload, _ = self.render_payload(log)
-        self.assertTrue(payload["unfinished"])
+        self.assertNotEqual(payload["records"][-1]["type"], "run_end")
         self.assertEqual(len(payload["records"]), 9)
         self.assertEqual(payload["notices"], [])
 
@@ -141,18 +140,19 @@ class InputHandling(RenderCase):
         log = self.log_from(lines, trailing_newline=False)
         payload, err = self.render_payload(log)
         self.assertEqual(len(payload["records"]), 9)
-        self.assertTrue(payload["unfinished"])
         self.assertEqual(payload["notices"], [{
             "kind": "incomplete_last_line",
             "line": 10,
             "message": "last line incomplete, file may still be written",
         }])
 
-    def test_complete_json_without_trailing_newline_is_still_skipped(self):
+    def test_complete_json_without_trailing_newline_is_kept(self):
         log = self.log_from(fixture_lines(), trailing_newline=False)
         payload, _ = self.render_payload(log)
-        self.assertEqual(len(payload["records"]), 9)
-        self.assertEqual(payload["notices"][0]["kind"], "incomplete_last_line")
+        self.assertEqual(len(payload["records"]), 10)
+        self.assertEqual(payload["lines"][-1], 10)
+        self.assertEqual(payload["records"][-1]["type"], "run_end")
+        self.assertEqual(payload["notices"], [])
 
     def test_malformed_lines_are_skipped_with_notice_and_stderr_warning(self):
         lines = fixture_lines()
@@ -165,7 +165,6 @@ class InputHandling(RenderCase):
         self.assertEqual(payload["lines"], [1, 2, 4, 6] + list(range(8, 14)))
         self.assertEqual(payload["notices"], [{
             "kind": "malformed_lines",
-            "count": 3,
             "lines": [3, 5, 7],
             "samples": [
                 {"line": 3, "text": "not json at all"},
@@ -185,7 +184,6 @@ class InputHandling(RenderCase):
             lines.insert(1, "bad %d" % i)
         payload, _ = self.render_payload(self.log_from(lines))
         notice = payload["notices"][0]
-        self.assertEqual(notice["count"], 8)
         self.assertEqual(notice["lines"], list(range(2, 10)))
         self.assertEqual(len(notice["samples"]), 5)
 
@@ -246,9 +244,8 @@ class FormatVersion(RenderCase):
         notices = decode_payload(out)["notices"]
         self.assertEqual(len(notices), 1)
         self.assertEqual(notices[0]["kind"], "newer_minor")
-        self.assertEqual(notices[0]["format"], "1.7")
-        self.assertEqual(notices[0]["reads"], "1.0")
         self.assertIn("1.7", notices[0]["message"])
+        self.assertIn("1.0", notices[0]["message"])
 
     def test_known_minor_has_no_notice(self):
         code, out, err = self.render(self.log_from(fixture_lines()), "-o", "-")

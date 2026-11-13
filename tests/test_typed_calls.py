@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import shutil
@@ -7,23 +6,17 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import dbfixlog  # noqa: E402
+import helpers  # noqa: E402
+from helpers import read_records  # noqa: E402
 
 THIS_FILE = os.path.basename(__file__)
 
 
-def read_records(path):
-    with open(path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f]
-
-
 def lineno_of(marker):
-    with open(__file__, encoding="utf-8") as f:
-        for i, line in enumerate(f, 1):
-            if marker in line and "lineno_of" not in line:
-                return i
-    raise AssertionError(marker)
+    return helpers.lineno_of(__file__, marker)
 
 
 class TypedCallTestCase(unittest.TestCase):
@@ -91,6 +84,16 @@ class ChangeTest(TypedCallTestCase):
         self.assertEqual(b["error"], {"type": "RuntimeError", "message": "x"})
         self.assertEqual(c["status"], "failed")
         self.assertEqual(c["level"], "ERROR")
+
+    def test_explicit_status_with_error_keeps_error_level(self):
+        # status= overrides the status only; the error still means ERROR.
+        with dbfixlog.run(self.path, mode="write", console=False) as log:
+            log.change("orders", "delete", key={"id": 1}, status="applied",
+                       error=RuntimeError("x"))
+        [c] = self.body()
+        self.assertEqual(c["status"], "applied")
+        self.assertEqual(c["level"], "ERROR")
+        self.assertEqual(c["error"], {"type": "RuntimeError", "message": "x"})
 
     def test_explicit_level_wins(self):
         with dbfixlog.run(self.path, mode="dry", console=False) as log:
@@ -170,19 +173,8 @@ class ChangeMisuseTest(TypedCallTestCase):
                 self.assertEqual(change["src"], src)
                 self.assertEqual(warning["src"], src)
 
-    def test_misuse_raises_under_strict(self):
-        for name, args, kwargs, _ in self.CASES:
-            with self.subTest(name):
-                with dbfixlog.run(self.path, mode="dry", console=False,
-                                  strict=True, overwrite=True) as log:
-                    with self.assertRaises(ValueError) as cm:
-                        log.change(*args, **kwargs)
-                self.assertIn("invalid change call", str(cm.exception))
-                self.assertEqual(self.body(), [])
-
     def test_valid_calls_write_no_warning(self):
-        with dbfixlog.run(self.path, mode="dry", console=False,
-                          strict=True) as log:
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
             log.change("orders", "insert", label={"no": "B1"})
             log.change("orders", "insert", key={"id": 9})
             log.change("orders", "update", key={"id": 1},
@@ -276,11 +268,11 @@ import dbfixlog
 log = dbfixlog.get_logger(__name__)
 
 
-def fix(order_id):
+def fix(run_log, order_id):
     log.info("fixing", fields={"id": order_id})
     log.finding("orphan-order", key={"id": order_id})
     log.change("orders", "delete", key={"id": order_id})
-    return log.dry_run
+    return run_log.dry_run
 '''
 
 
@@ -297,8 +289,9 @@ class GetLoggerTest(TypedCallTestCase):
     def test_helper_module_logs_into_active_run(self):
         # The helper's logger is created at import time, before the Run.
         helper = self.import_helper()
-        with dbfixlog.run(self.path, mode="dry", console=False):
-            dry = helper.fix(156)
+        # The script passes its own log in, so the helper can branch on the mode.
+        with dbfixlog.run(self.path, mode="dry", console=False) as run_log:
+            dry = helper.fix(run_log, 156)
         self.assertTrue(dry)
         msg, finding, change = self.body()
         for rec, line in ((msg, 7), (finding, 8), (change, 9)):
@@ -348,8 +341,8 @@ class OutsideRunTest(unittest.TestCase):
                          "object, got int 156"),
              ("WARNING", "orphan-order: no customer"),
              ("INFO", "inside")])
-        self.assertFalse(log.dry_run)
-        self.assertFalse(log.write_run)
+        self.assertFalse(hasattr(log, "dry_run"))
+        self.assertFalse(hasattr(log, "write_run"))
 
 
 if __name__ == "__main__":

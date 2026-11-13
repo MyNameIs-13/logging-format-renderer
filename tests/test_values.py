@@ -1,11 +1,9 @@
-"""Value encoding (SPEC 3.5), observed through the Log File."""
+"""Value encoding, observed through the Log File."""
 
 import datetime
 import decimal
 import enum
 import ipaddress
-import json
-import logging
 import os
 import shutil
 import sys
@@ -14,13 +12,10 @@ import unittest
 import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import dbfixlog  # noqa: E402
-
-
-def read_records(path):
-    with open(path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f]
+from helpers import read_records  # noqa: E402
 
 
 class ValueTest(unittest.TestCase):
@@ -149,16 +144,6 @@ class ValueTest(unittest.TestCase):
         self.assertEqual(v["ok"], 1)
         self.assertIn("ValueError: boom", v["w"]["$unencodable"])
 
-    def test_strict_raises_instead_of_unencodable(self):
-        class Bad(object):
-            def __str__(self):
-                raise ValueError("boom")
-        with dbfixlog.run(self.path, mode="dry", console=False,
-                          strict=True) as log:
-            with self.assertRaises(ValueError):
-                log.info("v", fields={"v": Bad()})
-        self.assertEqual(self.messages(), [])
-
     def test_custom_encoders_take_precedence(self):
         enc = {decimal.Decimal: float,
                datetime.datetime: lambda d: d.strftime("%Y%m%d%H%M%S")}
@@ -232,6 +217,55 @@ class ValueTest(unittest.TestCase):
             pass
         head = read_records(self.path)[0]
         self.assertEqual(head["target"], {"ratio": "NaN", "db": "x" * 2000})
+
+    def test_self_containing_list_is_written_with_a_cycle_marker(self):
+        v = [1]
+        v.append(v)
+        written = self.logged(v)
+        self.assertEqual(written[0], 1)
+        self.assertIn("$unencodable", written[1])
+
+    def test_self_containing_dict_is_written_with_a_cycle_marker(self):
+        v = {"a": 1}
+        v["self"] = v
+        written = self.logged(v)
+        self.assertEqual(written["a"], 1)
+        self.assertIn("$unencodable", written["self"])
+
+    def test_shared_non_cyclic_values_are_not_cycles(self):
+        shared = [1]
+        self.assertEqual(self.logged({"a": shared, "b": shared}),
+                         {"a": [1], "b": [1]})
+
+    def test_dict_key_whose_str_raises_still_writes_the_record(self):
+        class BadKey(object):
+            def __str__(self):
+                raise ValueError("boom")
+
+            def __repr__(self):
+                return "<BadKey>"
+
+            def __hash__(self):
+                return 1
+        v = self.logged({BadKey(): 1, "ok": 2})
+        self.assertEqual(v["ok"], 2)
+        [k] = [k for k in v if k != "ok"]
+        self.assertIn("<BadKey>", k)
+        self.assertEqual(v[k], 1)
+
+    def test_exception_whose_str_raises_still_writes_the_record(self):
+        class BadError(Exception):
+            def __str__(self):
+                raise ValueError("boom")
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            try:
+                raise BadError()
+            except BadError:
+                log.exception("failed")
+        [m] = self.messages()
+        self.assertEqual(m["msg"], "failed")
+        self.assertEqual(m["exc"]["type"], "BadError")
+        self.assertIn("$unencodable", m["exc"]["message"])
 
 
 if __name__ == "__main__":

@@ -1,10 +1,12 @@
 import io
+import json
 import logging
 import os
 import re
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
@@ -38,7 +40,7 @@ class ConsoleTestCase(unittest.TestCase):
 
 
 class ChangeAndFindingLineTest(ConsoleTestCase):
-    def test_change_in_scope_matches_spec_example(self):
+    def test_change_in_scope_is_prefixed_by_the_scope_label(self):
         with dbfixlog.run(self.path, mode="dry") as log:
             with log.scope("customer", key={"id": 42}, label={"name": "ACME"}):
                 log.change("orders", "delete", key={"id": 156})
@@ -110,6 +112,37 @@ class MessageLineTest(ConsoleTestCase):
             re.escape("INFO  delete orders planned"),
             re.escape("WARNING invalid change call: delete without key"),
         ])
+
+
+    def test_message_with_stack_info_includes_the_stack(self):
+        with dbfixlog.run(self.path, mode="dry") as log:
+            log.info("here", stack_info=True)
+        out = self.err.getvalue()
+        self.assertRegex(out, "^" + TIME + " INFO  here\nStack \\(most recent")
+
+
+class TimeTest(ConsoleTestCase):
+    def setUp(self):
+        ConsoleTestCase.setUp(self)
+        self._tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Asia/Kolkata"  # +05:30, never equal to UTC
+        time.tzset()
+
+    def tearDown(self):
+        if self._tz is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = self._tz
+        time.tzset()
+        ConsoleTestCase.tearDown(self)
+
+    def test_console_time_is_the_utc_time_of_the_record(self):
+        with dbfixlog.run(self.path, mode="dry") as log:
+            log.info("connected")
+        with open(self.path, encoding="utf-8") as f:
+            [rec] = [json.loads(l) for l in f if '"connected"' in l]
+        [line] = self.lines()
+        self.assertEqual(line[:8], rec["ts"][11:19])
 
 
 class ScopeLineTest(ConsoleTestCase):

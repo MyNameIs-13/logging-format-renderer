@@ -1,10 +1,12 @@
-"""SPEC §7 budgets: the realistic-entropy fixture and the 100k Report in Firefox.
+"""Load and search budgets: the realistic-entropy fixture and the 100k Report in Firefox.
 
 The fixture is written through dbfixlog.py itself (tests/budget_fixture.py), so these
 tests also run the writer end to end at volume.
 
-The Firefox budget test is skipped without firefox/node, or when DBFIXLOG_SKIP_BROWSER or
-DBFIXLOG_SKIP_BUDGET is set. It prints the measured numbers to stderr.
+The Firefox budget test measures from outside the page: data ready is when the list first
+shows rows, and each filter or search is timed around the filter bar control that applies
+it. It is skipped without firefox/node, or when DBFIXLOG_SKIP_BROWSER or
+DBFIXLOG_SKIP_BUDGET is set, and prints the measured numbers to stderr.
 """
 import collections
 import gzip
@@ -16,10 +18,10 @@ import sys
 import tempfile
 import unittest
 
-import budget_fixture
-import test_report_browser as base
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-_FF = base.StubReportInFirefox.__dict__  # not the class: unittest would collect it
+import budget_fixture  # noqa: E402
+from browser_report import FirefoxCase, skip_without_browser  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "dbfixlog_render.py")
@@ -91,47 +93,50 @@ class BudgetFixture(unittest.TestCase):
         self.assertEqual(strip(read_jsonl(other)), strip(self.records))
 
 
-# Waits for the Report and its idle-time search index (ticket 08), then times a set of
-# filters and searches through the real filter bar: filter.set() runs filterRows and
-# redraws the list synchronously; reading offsetHeight adds the forced layout.
-BUDGET_PROBE = """(() => {
-  const R = window.dbfixlogReport, d = document.documentElement.dataset;
-  if (d.state === "error") return JSON.stringify({error: d.error});
-  if (d.state !== "ready" || !R || !R.model.search) return "";
-  const t = R.timing;
-  const queries = [
-    {q: "deadlock"}, {q: "table:orders op:update"}, {q: "status:failed"},
-    {q: "check:no-lines level:warning"}, {q: "kind:customer is:unfinished"},
-    {q: "f.city=utrecht"}, {q: "INV-2024"}, {q: "lock timeout"}, {q: "zzzz-no-match"},
-    {view: "changes", q: ""}, {view: "findings"}, {view: "errors"},
-    {view: "all", level: "WARNING"}, {level: "DEBUG", q: "type:scope"}, {q: ""},
+# Runs in the page before any of its scripts: notes when the list first shows rows,
+# in ms since navigation start (performance.now()).
+FIRST_ROWS = """() => {
+  const seen = () => {
+    if (document.querySelector(".list .rows .vr")) { window.firstRowsAt = performance.now(); obs.disconnect(); }
+  };
+  const obs = new MutationObserver(seen);
+  obs.observe(document, {childList: true, subtree: true});
+}"""
+
+# Waits for the first rows, then a second more so the idle-time search index is built,
+# then times filters and searches through the filter bar's own controls. Each one is
+# applied synchronously; reading offsetHeight adds the forced layout.
+BUDGET_PROBE = """
+  if (!window.firstRowsAt || performance.now() < window.firstRowsAt + 1000) return "";
+  const nav = performance.getEntriesByType("navigation")[0];
+  out.firstRows = window.firstRowsAt;
+  out.responseEnd = nav ? nav.responseEnd : 0;
+  out.facts = q(".runhead .facts tr").map((tr) => texts("td", tr).join("|"));
+  const steps = [
+    () => search("deadlock"), () => search("table:orders op:update"), () => search("status:failed"),
+    () => search("check:no-lines level:warning"), () => search("kind:customer is:unfinished"),
+    () => search("f.city=utrecht"), () => search("INV-2024"), () => search("lock timeout"),
+    () => search("zzzz-no-match"), () => { search(""); view("changes"); }, () => view("findings"),
+    () => view("errors"), () => { view("all"); level("WARNING"); },
+    () => { level("DEBUG"); search("type:scope"); }, () => search(""),
   ];
-  const search = [];
-  for (const s of queries) {
+  out.search = [];
+  for (const step of steps) {
     const t0 = performance.now();
-    R.filter.set(s);
+    step();
     void document.body.offsetHeight;
-    search.push({s: s, ms: performance.now() - t0, filterMs: R.filter.last.ms,
-                 rows: R.list.rows.length});
+    out.search.push({ms: performance.now() - t0, count: count()});
   }
-  return JSON.stringify({count: Number(d.recordCount), timing: t, indexMs: R.filter.indexMs,
-                        search: search});
-})()"""
+"""
 
 BUDGET_N = 100000
 DATA_READY_MS = 500
 SEARCH_MS = 50
 
 
-@unittest.skipIf(os.environ.get("DBFIXLOG_SKIP_BROWSER") or os.environ.get("DBFIXLOG_SKIP_BUDGET"),
-                 "DBFIXLOG_SKIP_BROWSER or DBFIXLOG_SKIP_BUDGET set")
-@unittest.skipUnless(base.FIREFOX and base.NODE, "needs firefox and node on PATH")
-class BudgetInFirefox(unittest.TestCase):
-    setUpClass = _FF["setUpClass"]
-    tearDownClass = _FF["tearDownClass"]
-    _wait_for_bidi = _FF["_wait_for_bidi"]
-    open_report = _FF["open_report"]
-
+@unittest.skipIf(os.environ.get("DBFIXLOG_SKIP_BUDGET"), "DBFIXLOG_SKIP_BUDGET set")
+@skip_without_browser
+class BudgetInFirefox(FirefoxCase):
     def test_100k_records_meet_the_data_ready_and_search_budgets(self):
         log = os.path.join(self.dir, "budget.jsonl")
         budget_fixture.generate(log, BUDGET_N, seed=7)
@@ -141,24 +146,23 @@ class BudgetInFirefox(unittest.TestCase):
         with open(log, "rb") as f:
             raw = f.read()
         ratio = len(raw) / len(gzip.compress(raw, 9))
-        runs = [self.open_report(report, BUDGET_PROBE) for _ in range(3)]
+        runs = [self.probe(report, BUDGET_PROBE, timeout_ms=20000, preload=FIRST_ROWS)
+                for _ in range(3)]
+        records = len(raw.splitlines())
         for page in runs:
-            self.assertNotIn("error", page)
-            self.assertEqual(page["count"], len(raw.splitlines()))
-        ready = [p["timing"]["ready"] for p in runs]
+            self.assertIn("records|%s" % format(records, ","), page["facts"])
+            self.assertTrue(all(s["count"] for s in page["search"]))
+        ready = [p["firstRows"] for p in runs]
         worst = [max(s["ms"] for s in p["search"]) for p in runs]
         # Budgets: the median of three loads, so one hiccup on a busy machine doesn't fail it.
         med = lambda xs: sorted(xs)[len(xs) // 2]
-        t = runs[ready.index(med(ready))]["timing"]
         sys.stderr.write(
             "\n[budget] %d records, Log File %.1f MB, Report %.1f MB, gzip ratio %.2fx\n"
-            "[budget] data ready %s ms (median of %s; decode+parse %d, model+render %d,"
-            " since navigation %d), search index %d ms (idle)\n"
-            "[budget] filter/search worst %s ms (median of %s; filterRows alone <= %.1f)\n"
-            % (page["count"], len(raw) / 1e6, os.path.getsize(report) / 1e6, ratio,
-               round(med(ready)), [round(x) for x in ready], t["decode"], t["render"], t["nav"],
-               runs[ready.index(med(ready))]["indexMs"], round(med(worst), 1), [round(x, 1) for x in worst],
-               max(s["filterMs"] for p in runs for s in p["search"])))
+            "[budget] data ready (first rows, since navigation start) %d ms (median of %s)\n"
+            "[budget] filter/search worst %.1f ms (median of %s)\n"
+            % (records, len(raw) / 1e6, os.path.getsize(report) / 1e6, ratio,
+               round(med(ready)), [round(x) for x in ready],
+               med(worst), [round(x, 1) for x in worst]))
         self.assertLessEqual(ratio, 5.0)
         self.assertLessEqual(med(ready), DATA_READY_MS)
         self.assertLessEqual(med(worst), SEARCH_MS)

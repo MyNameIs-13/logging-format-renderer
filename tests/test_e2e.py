@@ -13,9 +13,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import test_report_browser as base
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-_FF = base.StubReportInFirefox.__dict__  # not the class: unittest would collect it
+from browser_report import DRIVER, NODE, FirefoxCase, skip_without_browser  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLE = os.path.join(ROOT, "tests", "fixtures", "sample_fix.py")
@@ -102,52 +102,32 @@ class SampleScriptRuns(unittest.TestCase):
 
 
 # Ready, plus a few interactions that touch every part of the page.
-E2E_PROBE = """(() => {
-  const R = window.dbfixlogReport, d = document.documentElement.dataset;
-  if (d.state === "error") return JSON.stringify({state: d.state, error: d.error});
-  if (d.state !== "ready" || !R) return "";
-  const out = {state: d.state, count: Number(d.recordCount)};
-  out.strip = (document.querySelector(".strip") || {}).textContent || "";
-  out.cards = Array.from(document.querySelectorAll("#cards .card h4")).map((h) => h.textContent);
-  const cn = document.querySelector("#cards a.cn");
-  if (cn) { cn.click(); out.cardQuery = R.filter.get().q; }
-  R.filter.query("status:failed");
-  out.failedRows = R.list.rows.length;
-  R.filter.query("");
-  const row = document.querySelector(".vr");
-  if (row) row.lastElementChild.click();
-  out.panel = !document.querySelector(".panel").hidden;
-  R.fold("all"); R.fold("phases"); R.fold("none");
-  R.list.setMode("flat"); R.list.setMode("tree");
-  out.rows = R.list.rows.length;
-  return JSON.stringify(out);
-})()"""
+E2E_PROBE = """
+  out.facts = q(".runhead .facts tr").map((tr) => texts("td", tr).join("|"));
+  out.strip = (strip() || {}).text || "";
+  out.cards = texts("#cards .card h4");
+  const cn = $("#cards a.cn");
+  if (cn) { cn.click(); out.cardQuery = searchBox().value; }
+  out.failedRows = filtered("status:failed").length;
+  filtered("", {mode: "tree"});
+  const first = listRows()[0];
+  if (first) first.lastElementChild.click();
+  out.panel = !$(".panel").hidden;
+  for (const how of ["all", "phases", "none"]) $('[data-foldall="' + how + '"]').click();
+  mode("flat"); mode("tree");
+  out.rows = ids().length;
+"""
 
 
-@unittest.skipIf(os.environ.get("DBFIXLOG_SKIP_BROWSER"), "DBFIXLOG_SKIP_BROWSER set")
-@unittest.skipUnless(base.FIREFOX and base.NODE, "needs firefox and node on PATH")
-class SampleReportsInFirefox(unittest.TestCase):
-    setUpClass = _FF["setUpClass"]
-    tearDownClass = _FF["tearDownClass"]
-    _wait_for_bidi = _FF["_wait_for_bidi"]
-
-    def open(self, report):
-        proc = subprocess.run(
-            [base.NODE, base.DRIVER, self.ws_url, Path(report).as_uri(), E2E_PROBE, "10000"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-        err = proc.stderr.decode("utf-8", "replace")
-        self.assertEqual(proc.returncode, 0, err)
-        self.assertNotIn("js-errors:", err)
-        return json.loads(proc.stdout.decode("utf-8"))
-
+@skip_without_browser
+class SampleReportsInFirefox(FirefoxCase):
     def test_dry_and_write_reports_load_and_work_without_js_errors(self):
         for write in (False, True):
             proc, log, _ = run_sample(self.dir, write)
             self.assertEqual(proc.returncode, 0, proc.stderr.decode())
             _, report = render(log)
-            page = self.open(report)
-            self.assertEqual(page["state"], "ready", page)
-            self.assertEqual(page["count"], len(read_jsonl(log)))
+            page = self.probe(report, E2E_PROBE)
+            self.assertIn("records|%s" % format(len(read_jsonl(log)), ","), page["facts"])
             if write:
                 self.assertEqual(page["strip"], "")  # a Write Run has no mode strip
             else:
@@ -155,18 +135,19 @@ class SampleReportsInFirefox(unittest.TestCase):
             self.assertEqual(page["cards"], ["Changes", "Findings", "Scopes"])
             self.assertTrue(page["cardQuery"])
             self.assertTrue(page["panel"])
+            self.assertGreater(page["rows"], 0)
             if write:
                 self.assertGreater(page["failedRows"], 0)
             else:
                 self.assertEqual(page["failedRows"], 0)
 
     def test_driver_reports_js_errors(self):
-        # The no-errors check above only means something if the driver sees errors at all.
+        # The no-errors check in probe() only means something if the driver sees errors at all.
         page = os.path.join(self.dir, "broken.html")
         with open(page, "w") as f:
             f.write("<!doctype html><title>x</title><script>window.x = 1; undefinedFn();</script>")
         proc = subprocess.run(
-            [base.NODE, base.DRIVER, self.ws_url, Path(page).as_uri(), "String(window.x)", "3000"],
+            [NODE, DRIVER, self.ws_url, Path(page).as_uri(), "String(window.x)", "3000"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         self.assertIn("js-errors:", proc.stderr.decode())
