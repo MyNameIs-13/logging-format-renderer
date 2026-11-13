@@ -18,6 +18,9 @@ __version__ = "0.1.0"
 
 FORMAT_VERSION = "1.0"
 LOGGER_NAME = "dbfixlog"
+# Loggers from run() and get_logger() live under LOGGER_NAME, so a Run sees
+# only them: plain stdlib loggers of the same name stay out of the Log File.
+LOGGER_PREFIX = LOGGER_NAME + "."
 
 # The one namespaced LogRecord attribute that carries typed fields, so they
 # never clash with the stdlib's own LogRecord attributes.
@@ -222,6 +225,13 @@ def _build_record(created, levelname, logger, rtype, src=None, msg=None,
     return rec
 
 
+def _public_name(name):
+    """A logger name as records show it: without the ``dbfixlog.`` prefix."""
+    if name.startswith(LOGGER_PREFIX):
+        return name[len(LOGGER_PREFIX):]
+    return name
+
+
 def _record_from_logrecord(record):
     data = getattr(record, ATTR, None) or {}
     data = dict(data)
@@ -236,7 +246,7 @@ def _record_from_logrecord(record):
         msg = record.getMessage()
     exc_info = record.exc_info if record.exc_info and record.exc_info[0] else None
     return _build_record(
-        record.created, record.levelname, record.name, rtype,
+        record.created, record.levelname, _public_name(record.name), rtype,
         src=src, msg=msg, exc_info=exc_info, extra=data, scope=scope,
     )
 
@@ -569,13 +579,17 @@ class RunLogger(TypedLogger):
         return self.run.mode == "write"
 
 
+def _namespaced_logger(name):
+    return logging.getLogger(LOGGER_PREFIX + name)
+
+
 def get_logger(name):
     """The adapter for helper modules: ``log = dbfixlog.get_logger(__name__)``.
 
     It may be created at import time, before any Run is open: its records
     reach whichever Run is open when they are logged.
     """
-    return TypedLogger(logging.getLogger(name))
+    return TypedLogger(_namespaced_logger(name or "__main__"))
 
 
 # --------------------------------------------------------------------------
@@ -655,8 +669,8 @@ def _safe(fn, default):
 def scope(kind, *, key=None, label=None, msg=None, fields=None):
     """Open a Scope: ``with dbfixlog.scope("customer", key={"id": 42}):``,
     or decorate a function with ``@dbfixlog.scope("orphan-check")``."""
-    src, logger = _caller(1)
-    return _Scope(kind, key, label, msg, fields, src, logger)
+    src, module = _caller(1)
+    return _Scope(kind, key, label, msg, fields, src, LOGGER_PREFIX + module)
 
 
 # --------------------------------------------------------------------------
@@ -689,14 +703,16 @@ class _Run(object):
         self.max_text = max_text
         self.overwrite = overwrite
         self.filter = RunFilter(self)
+        # The parent of every dbfixlog logger: the Run's handlers go here.
+        self.namespace = logging.getLogger(LOGGER_NAME)
         self.handler = None
         self.console_handler = None
         self.stream = None
         self.log = None
 
     def __enter__(self):
-        root = logging.getLogger()
-        if any(isinstance(h, JsonlHandler) for h in root.handlers):
+        base = self.namespace
+        if any(isinstance(h, JsonlHandler) for h in base.handlers):
             raise RuntimeError("dbfixlog.run() is already active; "
                                "nested Runs are not supported")
         self.start = time.time()
@@ -706,24 +722,25 @@ class _Run(object):
         try:
             self.handler = JsonlHandler(self.stream, self, self.level)
             self.handler.addFilter(self.filter)
-            self._root_level = root.level
-            root.addHandler(self.handler)
+            self.saved_level = base.level
+            self.saved_propagate = base.propagate
+            base.addHandler(self.handler)
+            base.propagate = False
             lowest = self.level
             console = _console_level(self.console)
             if console is not None:
                 self.console_handler = ConsoleHandler(sys.stderr, self,
                                                       console)
                 self.console_handler.addFilter(self.filter)
-                root.addHandler(self.console_handler)
+                base.addHandler(self.console_handler)
                 lowest = min(lowest, console)
-            if root.level > lowest or root.level == logging.NOTSET:
-                root.setLevel(lowest)
+            base.setLevel(lowest)
             header = {"format": FORMAT_VERSION, "mode": self.mode}
             header.update(_given(title=self.title, description=self.description,
                                  target=self.target, fields=self.fields))
             self.handler.write_dict(_build_record(
                 self.start, "INFO", LOGGER_NAME, "run_start", extra=header))
-            self.log = RunLogger(logging.getLogger("__main__"), self)
+            self.log = RunLogger(_namespaced_logger("__main__"), self)
         except BaseException:
             self._teardown()
             raise
@@ -759,13 +776,14 @@ class _Run(object):
         return False
 
     def _teardown(self):
-        root = logging.getLogger()
+        base = self.namespace
         if self.handler is not None:
-            root.removeHandler(self.handler)
-            root.setLevel(self._root_level)
+            base.removeHandler(self.handler)
+            base.setLevel(self.saved_level)
+            base.propagate = self.saved_propagate
             self.handler.close()
         if self.console_handler is not None:
-            root.removeHandler(self.console_handler)
+            base.removeHandler(self.console_handler)
             self.console_handler.close()
         if self.stream is not None:
             self.stream.close()

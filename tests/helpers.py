@@ -1,6 +1,7 @@
 """Helpers shared by the test modules."""
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -13,6 +14,30 @@ def read_records(path):
     """The records of a Log File, one per line."""
     with open(path, encoding="utf-8") as f:
         return [json.loads(line) for line in f]
+
+
+class Capture(logging.Handler):
+    """Keeps every LogRecord it is handed."""
+
+    def __init__(self):
+        logging.Handler.__init__(self)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def capture_root(test, level=None):
+    """A Capture on the root logger, removed when ``test`` ends. With
+    ``level``, the root level is set to it until then."""
+    cap = Capture()
+    root = logging.getLogger()
+    if level is not None:
+        test.addCleanup(root.setLevel, root.level)
+        root.setLevel(level)
+    root.addHandler(cap)
+    test.addCleanup(root.removeHandler, cap)
+    return cap
 
 
 def lineno_of(path, marker):

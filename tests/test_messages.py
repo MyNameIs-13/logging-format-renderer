@@ -32,9 +32,10 @@ class MessageTest(unittest.TestCase):
     def messages(self):
         return [r for r in read_records(self.path) if r["type"] == "message"]
 
-    def test_plain_stdlib_logger_becomes_message(self):
+    def test_get_logger_plain_call_becomes_message(self):
+        helper = dbfixlog.get_logger("x.helper")
         with dbfixlog.run(self.path, mode="dry", console=False):
-            logging.getLogger("x.helper").info("hi %s", "there")  # MARK-plain
+            helper.info("hi %s", "there")  # MARK-plain
         [m] = self.messages()
         self.assertEqual(m["logger"], "x.helper")
         self.assertEqual(m["level"], "INFO")
@@ -44,6 +45,24 @@ class MessageTest(unittest.TestCase):
         self.assertEqual(list(m)[:6], ["ts", "level", "logger", "type", "src", "msg"])
         self.assertNotIn("fields", m)
         self.assertNotIn("scope", m)
+
+    def test_plain_stdlib_loggers_stay_out(self):
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            logging.getLogger("x.helper").warning("plain")
+            logging.getLogger("__main__").error("plain main")
+            logging.getLogger().critical("plain root")
+            log.info("kept")
+        self.assertEqual([m["msg"] for m in self.messages()], ["kept"])
+
+    def test_records_do_not_reach_root_handlers_during_run(self):
+        cap = helpers.capture_root(self)
+        with dbfixlog.run(self.path, mode="dry", console=False) as log:
+            log.warning("only in the file")
+            dbfixlog.get_logger("x.helper").finding("orphan-order")
+            with dbfixlog.scope("phase"):
+                pass
+        self.assertEqual(cap.records, [])
+        self.assertEqual(len(self.messages()), 1)
 
     def test_log_adapter_message_with_fields(self):
         with dbfixlog.run(self.path, mode="dry", console=False) as log:
@@ -83,7 +102,7 @@ class MessageTest(unittest.TestCase):
         with dbfixlog.run(self.path, mode="dry", level=logging.ERROR,
                           console=False) as log:
             log.info("dropped")
-            logging.getLogger("x").warning("dropped too")
+            dbfixlog.get_logger("x").warning("dropped too")
             log.error("kept")
         recs = read_records(self.path)
         self.assertEqual([r["type"] for r in recs],
@@ -97,6 +116,7 @@ class MessageTest(unittest.TestCase):
         try:
             with dbfixlog.run(self.path, mode="dry", console=False) as log:
                 log.debug("d")
+                self.assertEqual(root.level, logging.WARNING)
             self.assertEqual(root.level, logging.WARNING)
         finally:
             root.setLevel(old)

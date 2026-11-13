@@ -79,7 +79,7 @@ class ChangeAndFindingLineTest(ConsoleTestCase):
 class MessageLineTest(ConsoleTestCase):
     def test_message_uses_stdlib_text_with_args(self):
         with dbfixlog.run(self.path, mode="dry") as log:
-            logging.getLogger("helper").info("rows: %d", 12)
+            dbfixlog.get_logger("helper").info("rows: %d", 12)
             log.info("connected", fields={"rows": 12})
         self.assertLines([re.escape("INFO  rows: 12"),
                           re.escape("INFO  connected")])

@@ -55,7 +55,7 @@ Common fields:
 |---|---|---|
 | `ts` | required | ISO 8601, UTC, millisecond precision (`"2026-11-12T20:01:00.000Z"`) |
 | `level` | required | stdlib level name (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
-| `logger` | required | logger name |
+| `logger` | required | logger name, without the `dbfixlog.` prefix (4.2) |
 | `type` | required | `message`, `finding`, `change`, `scope_start`, `scope_end`, `run_start`, `run_end` |
 | `src` | required, except on `run_start` / `run_end` | `file.py:123` |
 | `scope` | absent outside any Scope | the Scope path, see 3.4 |
@@ -209,19 +209,23 @@ run(path, *, mode, title=None, description=None, target=None, fields=None,
 ```
 
 - All configuration lives in these arguments. There is no config file and no environment variables.
-- On entry, `run()` writes `run_start`. On exit it writes `run_end` (outcome and `exit_code` as in 3.2), then re-raises any exception. Its handlers are removed on exit. Root handlers that already existed (e.g. from `basicConfig`) are left alone.
+- On entry, `run()` writes `run_start`. On exit it writes `run_end` (outcome and `exit_code` as in 3.2), then re-raises any exception. Its handlers are removed on exit. The root logger (its handlers, e.g. from `basicConfig`, and its level) is never touched.
 - `path` is required. It may contain `{ts}`, which becomes the Run's start time (`20261112T200100Z`). An existing Log File is refused unless `overwrite=True`.
 - `run()` is setup, so it may raise: for an existing file, a path it can't open, an invalid `mode` or a nested `run()`. Logging calls never raise.
 - `encoders={Type: fn}` and `max_text` control value encoding (3.5).
-- During a Run, the root logger's level is lowered to the lower of `level` and `console`. Library DEBUG records therefore reach the Log File at the default `level=logging.DEBUG`. Pass `level=` to limit them.
+- `level` is the Log File's threshold and `console` the terminal's. During a Run, dbfixlog's own logger namespace is set to the lower of the two; nothing outside it changes.
 
 ### 4.2 Loggers
 
-- The JSONL handler is attached to the **root logger**. Plain `logging.getLogger(__name__).info(...)` calls from the script, its helpers and libraries therefore become Messages with their real `logger` name.
-- `log` (returned by `run()`, logger `__main__`) and `dbfixlog.get_logger(__name__)` (for helper modules) are stdlib adapters that add `finding`, `change` and `scope`.
+- **Opt-in:** only records logged through `log` (from `run()`), a `dbfixlog.get_logger(...)` adapter or `dbfixlog.scope(...)` reach the Log File and the console. A module-level `dbfixlog.scope()` belongs to the calling module's logger in the namespace (`dbfixlog.<__name__>`). Plain `logging.getLogger(...)` calls from the script, its helpers and libraries never do, even under the same name.
+  - These loggers live in dbfixlog's own namespace (`get_logger("orders")` is the stdlib logger `dbfixlog.orders`). Log File records show the name without the prefix: `"logger": "orders"`.
+  - `get_logger(None)` and `get_logger("")` return the `__main__` logger, the one `log` uses.
+  - `dbfixlog` and `dbfixlog.*` are reserved logger names. A plain `logging.getLogger("dbfixlog.x")` is inside the namespace and reaches the Log File as `x`; nothing guards against it.
+  - The Run's handlers are attached to that namespace, not the root logger. During a Run its records don't propagate to the root logger, so the script's own logging setup doesn't print them a second time.
+- `log` (returned by `run()`, stdlib logger `dbfixlog.__main__`, shown as `__main__`) and `dbfixlog.get_logger(__name__)` (for helper modules) are stdlib adapters that add `finding`, `change` and `scope`.
   - Helpers' records reach the active Run without `log` being passed in.
   - Only `log` has `dry_run` / `write_run`. `get_logger()` adapters don't know the Run's mode, so a helper that writes takes the script's `log` (or the mode) as an argument.
-  - Outside a Run, typed calls fall back to plain stdlib logging.
+  - Outside a Run, their records (typed calls included) propagate to the root logger under their full stdlib name (`dbfixlog.orders`), so the script's own logging setup decides what is shown. Scope start and end records skip the loggers' level checks, as during a Run, so a root handler sees them at INFO even when the root level is higher.
 - Messages use the stdlib methods plus an optional `fields=` dict: `log.info("connected", fields={"rows": 12})`.
 
 ### 4.3 Typed calls

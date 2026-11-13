@@ -8,8 +8,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import dbfixlog  # noqa: E402
+import helpers  # noqa: E402
 
 TS_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
 
@@ -109,35 +111,65 @@ class RunBracketTest(RunTestCase):
 
 
 class HandlerLifecycleTest(RunTestCase):
-    def test_handlers_removed_and_preexisting_root_handlers_kept(self):
+    def test_root_logger_untouched(self):
         root = logging.getLogger()
         mine = logging.NullHandler()
         root.addHandler(mine)
-        try:
-            before = list(root.handlers)
-            with dbfixlog.run(self.path, mode="dry", console=False):
-                self.assertIn(mine, root.handlers)
-                self.assertGreater(len(root.handlers), len(before))
-            self.assertEqual(root.handlers, before)
-            with self.assertRaises(RuntimeError):
-                with dbfixlog.run(os.path.join(self.dir, "b.jsonl"),
-                                  mode="dry", console=False):
-                    raise RuntimeError("x")
-            self.assertEqual(root.handlers, before)
-        finally:
-            root.removeHandler(mine)
+        self.addCleanup(root.removeHandler, mine)
+        before = (list(root.handlers), root.level)
+        with dbfixlog.run(self.path, mode="dry"):
+            self.assertEqual((root.handlers, root.level), before)
+        self.assertEqual((root.handlers, root.level), before)
+        with self.assertRaises(RuntimeError):
+            with dbfixlog.run(os.path.join(self.dir, "b.jsonl"), mode="dry"):
+                raise RuntimeError("x")
+        self.assertEqual((root.handlers, root.level), before)
 
-    def test_root_level_restored(self):
-        root = logging.getLogger()
-        level = root.level
+    def test_helper_logging_reaches_root_again_after_run(self):
+        cap = helpers.capture_root(self)
+        helper = dbfixlog.get_logger("x")
         with dbfixlog.run(self.path, mode="dry", console=False):
+            helper.warning("during")
+        helper.warning("after")
+        self.assertEqual([r.getMessage() for r in cap.records], ["after"])
+
+    def assertHelperLoggingRestored(self):
+        cap = helpers.capture_root(self, level=logging.DEBUG)
+        dbfixlog.get_logger("x").info("after")
+        self.assertEqual([r.getMessage() for r in cap.records], ["after"])
+
+    def test_namespace_restored_after_run_with_high_level(self):
+        with dbfixlog.run(self.path, mode="dry", level=logging.ERROR,
+                          console=False):
             pass
-        self.assertEqual(root.level, level)
+        self.assertHelperLoggingRestored()
+
+    def test_namespace_restored_after_exception(self):
+        with self.assertRaises(KeyError):
+            with dbfixlog.run(self.path, mode="dry", level=logging.ERROR,
+                              console=logging.ERROR):
+                raise KeyError("x")
+        self.assertHelperLoggingRestored()
+
+    @unittest.skipUnless(os.path.exists("/dev/full"), "needs /dev/full")
+    def test_namespace_restored_after_failed_header_write(self):
+        with self.assertRaises(OSError):
+            with dbfixlog.run("/dev/full", mode="dry", level=logging.ERROR,
+                              console=False, overwrite=True):
+                pass
+        self.assertHelperLoggingRestored()
+
+    def test_namespace_restored_after_failed_setup(self):
+        with self.assertRaises(TypeError):
+            with dbfixlog.run(self.path, mode="dry", level=logging.ERROR,
+                              console="loud"):
+                pass
+        self.assertHelperLoggingRestored()
 
     def test_logging_after_run_does_not_reach_file(self):
         with dbfixlog.run(self.path, mode="dry", console=False):
             pass
-        logging.getLogger("x").warning("after")
+        dbfixlog.get_logger("x").warning("after")
         self.assertEqual(read_records(self.path)[-1]["type"], "run_end")
 
 
