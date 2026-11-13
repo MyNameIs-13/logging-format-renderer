@@ -171,7 +171,7 @@ Values are written **for display, not for typed round-trip**. The JSON is readab
 - **Missing vs null:** a missing key means "not logged". In `changes`, it means "field not changed". The logger never drops keys whose value is `None`.
 - **No NULL-vs-empty guarantee:** the Uniface database loader doesn't reliably tell `null` and `""` apart.
 - **`$`-prefixed objects** mark values the logger altered. The Report shows them as markers (e.g. a "truncated" badge), never as real data.
-- **Logging never raises** by default. A type → encoder mapping and an opt-in `strict=True` (for tests) are set up in `run()` (see 4.1). Under `strict=True`, the logger raises instead of writing `$unencodable`.
+- **Logging never raises.** A value that can't be encoded (including a cycle, a dict key whose `str()` raises, or an exception whose `__str__` raises) becomes `$unencodable`, and the record is still written. A type → encoder mapping is set up in `run()` (see 4.1).
 
 ### 3.6 Example Log File
 
@@ -204,21 +204,23 @@ with dbfixlog.run("fix-{ts}.jsonl", mode="dry", title="Orphaned orders cleanup",
 
 ```python
 run(path, *, mode, title=None, description=None, target=None, fields=None,
-    level=logging.DEBUG, console=logging.INFO, encoders=None, strict=False,
+    level=logging.DEBUG, console=logging.INFO, encoders=None,
     max_text=1000, overwrite=False)
 ```
 
 - All configuration lives in these arguments. There is no config file and no environment variables.
 - On entry, `run()` writes `run_start`. On exit it writes `run_end` (outcome and `exit_code` as in 3.2), then re-raises any exception. Its handlers are removed on exit. Root handlers that already existed (e.g. from `basicConfig`) are left alone.
 - `path` is required. It may contain `{ts}`, which becomes the Run's start time (`20261112T200100Z`). An existing Log File is refused unless `overwrite=True`.
-- `run()` is setup, so it may raise: for an existing file, a path it can't open, an invalid `mode` or a nested `run()`. Logging calls never raise, except under `strict=True`.
-- `encoders={Type: fn}`, `strict` and `max_text` control value encoding (3.5).
+- `run()` is setup, so it may raise: for an existing file, a path it can't open, an invalid `mode` or a nested `run()`. Logging calls never raise.
+- `encoders={Type: fn}` and `max_text` control value encoding (3.5).
+- During a Run, the root logger's level is lowered to the lower of `level` and `console`. Library DEBUG records therefore reach the Log File at the default `level=logging.DEBUG`. Pass `level=` to limit them.
 
 ### 4.2 Loggers
 
 - The JSONL handler is attached to the **root logger**. Plain `logging.getLogger(__name__).info(...)` calls from the script, its helpers and libraries therefore become Messages with their real `logger` name.
 - `log` (returned by `run()`, logger `__main__`) and `dbfixlog.get_logger(__name__)` (for helper modules) are stdlib adapters that add `finding`, `change` and `scope`.
-  - Helpers find the active Run without `log` being passed in.
+  - Helpers' records reach the active Run without `log` being passed in.
+  - Only `log` has `dry_run` / `write_run`. `get_logger()` adapters don't know the Run's mode, so a helper that writes takes the script's `log` (or the mode) as an argument.
   - Outside a Run, typed calls fall back to plain stdlib logging.
 - Messages use the stdlib methods plus an optional `fields=` dict: `log.info("connected", fields={"rows": 12})`.
 
@@ -239,11 +241,10 @@ def orphan_check(): ...
 - **Change status:**
   - With no `status`, it is `planned` in a Dry Run and `applied` in a Write Run.
   - `error=exc` makes it `failed`, with `error` `{type, message}`, at level ERROR.
-  - An explicit `status=` overrides both.
+  - An explicit `status=` decides the status only. A Change with `error=` is still logged at ERROR unless `level=` is given.
 - **`changes`:** accepts `{"field": (old, new)}` tuples or `{"field": {"old": …, "new": …}}` dicts, written as given. Entries where old equals new are not dropped.
 - **Misuse:** an unknown `op`, an `update` without `changes`, a missing `key` on a non-insert, or a bare scalar `key`.
-  - The record is written as given, followed by a WARNING Message `invalid change call: …`.
-  - Under `strict=True` the call raises instead.
+  - The record is written as given, followed by a WARNING Message `invalid change call: …`. The call never raises.
   - A scalar key is never wrapped automatically, because the column name is unknown.
 
 ### 4.4 Dry Run guard and commit
@@ -254,7 +255,7 @@ if log.write_run:
 log.change("orders", "delete", key={"id": 156}, label={"no": "A88f"})
 ```
 
-- The API does not prevent writes in a Dry Run. Scripts branch on `log.dry_run` / `log.write_run`. The Report's red strip (6.2) catches `applied` or `failed` Changes in a Dry Run.
+- The API does not prevent writes in a Dry Run. Scripts branch on `log.dry_run` / `log.write_run` (only on `run()`'s `log`; see 4.2). The Report's red strip (6.2) catches `applied` or `failed` Changes in a Dry Run.
 - `applied` means *the statement executed without error*. Commit and rollback are not tracked per Change.
   - A script that rolls back says so with a Message.
   - An exception that escapes a Scope ends it as `error`.
@@ -273,9 +274,9 @@ log.change("orders", "delete", key={"id": 156}, label={"no": "A88f"})
 
 ### 4.6 Concurrency and implementation notes
 
-- One Run per process, with a single writer.
+- One Run per process, with a single writer. Nothing guards against two threads calling `run()` at once; that is unsupported.
 - Scope state lives in **`threading.local`**, because `contextvars` needs 3.7+. Each thread keeps its own Scope path. `asyncio` scripts are unsupported, and there is no further thread or process support.
-- No mutable module-level state in `dbfixlog.py` or `dbfixlog_render.py` (no `global`, no module-level locks, thread-locals or mutated containers): no code looks up an active Run. Adapters and `scope()` only emit LogRecords; everything that depends on the Run (default Change status, Scope ids and the per-thread Scope path, value encoding, strict raising) happens in the Run's own handlers and their shared filter.
+- No mutable module-level state in `dbfixlog.py` or `dbfixlog_render.py` (no `global`, no module-level locks, thread-locals or mutated containers): no code looks up an active Run. Adapters and `scope()` only emit LogRecords; everything that depends on the Run (default Change status, Scope ids and the per-thread Scope path, value encoding) happens in the Run's own handlers and their shared filter.
 - Build on stdlib `logging` only (_source: [Prior-art survey for structured logs → HTML](issues/01-prior-art-survey.md)_):
   - Stamp the Scope path onto every record with a `logging.Filter` that reads the thread-local Scope state. This is the cookbook pattern, with `threading.local` in place of `ContextVar`.
   - Put typed fields under **one namespaced LogRecord attribute**, because `extra` keys that clash with LogRecord attributes raise `KeyError`. python-json-logger's reserved-attribute list is a useful reference.
@@ -344,7 +345,7 @@ _Source: [Making 100k records usable in one HTML file](issues/02-large-single-fi
   - Whatever is embedded must not be able to close the script block early. Base64 text contains no `<`; raw JSON would need `<` escaped.
 - **Rendering:** plain JS that renders only the visible rows, each of fixed height (~100 lines of code in the research). 100k rows at 24–28 px is ~2.8M px, well under the binding browser limit (Firefox's maximum element height, ~17M px).
 - **Search:**
-  - A linear scan over the records, with no index and no Web Worker.
+  - No Web Worker. A search index is built at idle time right after data ready (~200 ms at 100k), and the search box debounces input by 150 ms. Only a search started within about 50 ms of data ready pays for part of the build.
   - Ctrl+F can't see unrendered rows, so the Report has its own search box.
 - **Inside the Report**, the renderer may reshape the embedded data (e.g. into columnar arrays) if the builder needs that to meet the budgets. This is internal and not a format change (_source: [Report size budget](issues/11-report-size-budget.md)_).
 
@@ -468,11 +469,14 @@ _Source: [Report size budget](issues/11-report-size-budget.md)._
 
 Acceptance criteria at 100k records, opened from `file://` in a current desktop browser:
 
-| Measure | Budget | Prototype measurement (synthetic data, fast desktop) |
-|---|---|---|
-| Data ready | ≤ 0.5 s | 310–365 ms (decode ~110, parse ~140, model ~80) |
-| Filter / search | ≤ 50 ms | 1–25 ms |
-| First real Log File ≥ 10k records | (to be measured) | |
+| Measure | Budget | Prototype measurement (synthetic data, fast desktop) | Build measurement (budget fixture, 100,011 records, headless Firefox) |
+|---|---|---|---|
+| Data ready | ≤ 0.5 s | 310–365 ms (decode ~110, parse ~140, model ~80) | 446 ms median (432/446/453), from navigation start to the first list rows |
+| Filter / search | ≤ 50 ms | 1–25 ms | worst 41 ms median |
+| Report size | none | | 11.9 MB, gzip ratio 4.27x |
+| First real Log File ≥ 10k records | (to be measured) | | |
+
+- **Measurement method:** the build measures from outside the page. Data ready is timed from navigation start, so it includes parsing the ~12 MB HTML (the prototype timed from script start). Each search, view click and level change is timed around the control that applies it, after waiting 1 s for the idle-time search index.
 
 - **There is no file-size budget.** Size follows the data. Expect about 3–7 MB at 100k records, depending on how well the values compress (the synthetic data compresses ~9.5x, real data likely 4–6x). This figure is information only.
 - **Load time** depends mainly on raw record bytes (parse and model building), so less compressible data barely affects it.
